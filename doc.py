@@ -174,7 +174,19 @@ def pfmt_or_na(x: Any) -> str:
         return f"{round(x, 1)}%"
     except Exception:
         return "N/A"
+def contains_bad_zero_values(text: str) -> bool:
+    bad_patterns = [
+        r"\$0(?:\.0+)?M",
+        r"\$0(?:\.0+)?K",
+        r"\b0(?:\.0+)?%\b",
+        r"\|\s*0(?:\.0+)?\s*\|",
+    ]
+    return any(re.search(p, text) for p in bad_patterns)
 
+
+def assert_no_bad_zero_values(text: str, label: str) -> None:
+    if contains_bad_zero_values(text):
+        raise ValueError(f"{label} contains unsupported zero values. Recalculate and regenerate.")
 
 def allocate_component_total(total: float, weights: List[float]) -> List[float]:
     total = round1(total)
@@ -444,31 +456,32 @@ NO markdown.
 NO explanations.
 
 Schema:
-{{
-  "company_facts": {{
+{
+  "company_facts": {
     "employee_count": 0,
     "annual_revenue_m": 0,
     "sector": "",
     "legacy_level": "high | moderate | low",
     "scope_preference": "light | medium | heavy"
-  }},
+  },
   "business_units": [
-    {{
+    {
       "name": "",
       "estimated_weight_pct": 0
-    }}
+    }
   ],
   "value_drivers": [
-    {{
+    {
       "business_unit": "",
       "driver_name": "",
       "revenue_or_cost_base_m": 0,
       "improvement_pct": 0,
       "annual_impact_m": 0,
       "source_logic": ""
-    }}
-  ]
-}}
+    }
+  ],
+  "error": ""
+}
 
 Rules:
 - annual_revenue_m must be in millions
@@ -477,6 +490,10 @@ Rules:
 - estimated_weight_pct across business_units should sum close to 100
 - Do not invent fake value drivers just to reach a target count
 - Output JSON only
+- NEVER output 0 for employee_count, annual_revenue_m, revenue_or_cost_base_m, annual_impact_m, or improvement_pct unless explicitly stated in the BI
+- If a company fact is missing, estimate it from the BI and public scale cues
+- If a value driver is weak or incomplete, derive the annual impact using the best available base and percentage
+- If you cannot support at least 4 value drivers with non-zero annual impact, return an error object instead of zero-filled rows
 
 COMPANY NAME:
 {company_name}
@@ -701,15 +718,48 @@ LEGACY_MULTIPLIERS = {
 
 def financial_extract_node(state: AdmFinancialState) -> AdmFinancialState:
     client = st.session_state._gemini_client
-    prompt = FINANCIAL_EXTRACTION_PROMPT.format(
+
+    base_prompt = FINANCIAL_EXTRACTION_PROMPT.format(
         company_name=state["company_name"],
         business_intelligence=state["bi_text"],
     )
-    raw = client.generate(prompt)
+
+    raw = client.generate(base_prompt)
     cleaned = clean_json_response(raw)
     extracted = json.loads(cleaned)
-    return {"extracted_inputs": extracted}
 
+    def extracted_has_bad_zeros(data: Dict[str, Any]) -> bool:
+        facts = data.get("company_facts", {})
+        if safe_float(facts.get("employee_count")) <= 0:
+            return True
+        if safe_float(facts.get("annual_revenue_m")) <= 0:
+            return True
+
+        drivers = data.get("value_drivers", [])
+        non_zero_drivers = 0
+        for d in drivers:
+            if safe_float(d.get("annual_impact_m")) > 0:
+                non_zero_drivers += 1
+        return non_zero_drivers < 4
+
+    if extracted.get("error") or extracted_has_bad_zeros(extracted):
+        retry_prompt = base_prompt + """
+
+STRICT RETRY INSTRUCTION:
+- Your previous output contained zero, missing, or unusable financial values.
+- Recalculate and re-estimate all missing company facts.
+- Return at least 4 non-zero value drivers.
+- Do NOT output any driver with annual_impact_m = 0.
+- Do NOT output employee_count = 0 or annual_revenue_m = 0.
+"""
+        raw = client.generate(retry_prompt)
+        cleaned = clean_json_response(raw)
+        extracted = json.loads(cleaned)
+
+    if extracted.get("error"):
+        raise ValueError(extracted["error"])
+
+    return {"extracted_inputs": extracted}
 
 def build_business_unit_allocations(
     business_units: List[Dict[str, Any]],
@@ -813,6 +863,10 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     employee_count = safe_int(facts.get("employee_count"), 10000)
     annual_revenue_m = safe_float(facts.get("annual_revenue_m"), 1000.0)
     sector = facts.get("sector", "Manufacturing")
+    if employee_count <= 0:
+        raise ValueError("Employee count was not extracted with a valid non- zero value.")
+    if annual_revenue_m <= 0:
+        raise ValueError("Annual revenue was not extracted with a valid non-zero value.")
     if sector not in SECTOR_APP_RATIOS:
         sector = "Manufacturing"
 
@@ -1363,8 +1417,20 @@ def run_numeric_correction(
         adm_text=adm_text,
     )
     corrected = client.generate(prompt)
-    return corrected if corrected.strip() else adm_text
+    final_text = corrected if corrected.strip() else adm_text
 
+    if contains_bad_zero_values(final_text):
+        retry_prompt = prompt + """
+
+STRICT RETRY:
+- The corrected ADM still contains invalid zero values.
+- Replace every unsupported zero with the correct number from the Financial Summary JSON.
+- If a section is unsupported, remove the zero-filled row rather than leaving $0.0M or 0.0%.
+"""
+        final_text = client.generate(retry_prompt).strip()
+
+    assert_no_bad_zero_values(final_text, "ADM output")
+    return final_text
 
 def generate_adm_batch1(
     client: GeminiClient,
@@ -1380,14 +1446,15 @@ def generate_adm_batch1(
         financial_tables_text=financial_tables_text,
     )
     raw = client.generate(prompt)
-    return run_numeric_correction(
+    corrected = run_numeric_correction(
         client=client,
         business_intelligence=business_intelligence,
         financial_summary=financial_summary,
         financial_tables_text=financial_tables_text,
         adm_text=raw,
     )
-
+    assert_no_bad_zero_values(corrected, "ADM Batch 1")
+    return corrected
 
 def generate_adm_next_batch(
     client: GeminiClient,
@@ -1407,14 +1474,15 @@ def generate_adm_next_batch(
         next_batch_number=next_batch_number,
     )
     raw = client.generate(prompt)
-    return run_numeric_correction(
+    corrected = run_numeric_correction(
         client=client,
         business_intelligence=business_intelligence,
         financial_summary=financial_summary,
         financial_tables_text=financial_tables_text,
         adm_text=raw,
     )
-
+    assert_no_bad_zero_values(corrected, f"ADM Batch {next_batch_number}")
+    return corrected
 
 # ============================================================
 # SESSION STATE
