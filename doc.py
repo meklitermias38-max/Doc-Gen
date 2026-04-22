@@ -22,6 +22,14 @@ except ImportError:
     END = None
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
+HARDCODED_GEMINI_API_KEY = "AIzaSyCqfUjHZ_6xBicwOF_jFIxN8nR1kjzGVj0" 
+DEFAULT_MODEL_NAME = "gemini-3.1-pro-preview"
+
+
 st.set_page_config(page_title="Company Document Generator", layout="wide")
 st.title("Company Document Generator")
 st.caption("Generate Business Intelligence, Executive Storylines, and ADM using Gemini")
@@ -144,6 +152,30 @@ def pfmt(x: float) -> str:
     return f"{round1(x)}%"
 
 
+def mfmt_or_na(x: Any) -> str:
+    try:
+        if x is None:
+            return "N/A"
+        x = float(x)
+        if abs(x) < 0.0001:
+            return "N/A"
+        return f"${round(x, 1):,.1f}M"
+    except Exception:
+        return "N/A"
+
+
+def pfmt_or_na(x: Any) -> str:
+    try:
+        if x is None:
+            return "N/A"
+        x = float(x)
+        if abs(x) < 0.0001:
+            return "N/A"
+        return f"{round(x, 1)}%"
+    except Exception:
+        return "N/A"
+
+
 def allocate_component_total(total: float, weights: List[float]) -> List[float]:
     total = round1(total)
     raw = [total * w for w in weights]
@@ -173,18 +205,6 @@ def find_payback_years(investment: float, annual_value: float) -> float:
             fraction = remaining / yv if yv > 0 else 0
             return round(idx - 1 + fraction, 2)
     return 5.0
-
-
-def extract_numbers_from_text(text: str) -> List[str]:
-    patterns = [
-        r"\$[0-9][0-9,]*\.?[0-9]*[MBK]?",
-        r"[0-9][0-9,]*\.?[0-9]*%",
-        r"[0-9][0-9,]*\.?[0-9]*\s*(?:years|year|months|month|weeks|week|days|day|hours|hour|minutes|min)",
-    ]
-    found: List[str] = []
-    for p in patterns:
-        found.extend(re.findall(p, text, flags=re.IGNORECASE))
-    return found
 
 
 # ============================================================
@@ -231,27 +251,122 @@ class GeminiClient:
 BI_PROMPT = """
 You are a senior enterprise strategy consultant.
 
-Generate a complete BUSINESS INTELLIGENCE document for the company below.
+Your task is to generate a complete Business Intelligence document for the company below.
 
 Company Name: {company_name}
 
-STRICT RULES
-- Identify 3 to 5 top business lines only
-- Business lines must be functional, not geographic
-- If business lines are based on geographic footprint, regenerate answer
-- For each business line include:
-  1. Market Leaders
-  2. What "Good" Looks Like Today in the company
-  3. What "Good" Looks Like Today Across Market Leaders
-  4. Challenges faced by the company in that business line
-  5. Strategic AI Reinvention and ROI
-  6. 5 Daily AI-Driven Nudges
-  7. What to do to deliver
-- End with a Summary of Quantified Impact Annual table with:
-  Business Unit | Primary Hard ROI Metric | Estimated Annual Dollar Impact
-- Be highly specific to the company
+STRICT OUTPUT RULES
+- Identify exactly 3 to 5 top business lines only
+- Business lines must be FUNCTIONAL, not geographic
+- If business lines are based on geography, regenerate internally before answering
+- Do not include any introduction, disclaimer, methodology note, or conclusion before the business lines
+- Start directly with the business lines
+- Keep the structure exactly as specified below
+- Use the exact section labels below
+- Do not skip any section
+- Do not merge sections
+- Do not change the order
+- Do not use placeholder text
+- Do not use generic filler
 - Quantify impact wherever possible
-- Keep formatting clean and Word-ready
+- Be specific to the company
+
+REQUIRED OUTPUT STRUCTURE
+
+First, output this heading exactly:
+TOP BUSINESS LINES AND REVENUE
+
+Then provide a table in this exact format:
+| Business Line | Estimated Revenue | Notes |
+|---|---:|---|
+
+After the table, create a separate full section for EACH business line using this exact structure:
+
+## [Business Line Name]
+
+**Market Leaders:** [List named competitors]
+
+**What "Good" Looks Like Today in {company_name}:**
+- [Bullet 1]
+- [Bullet 2]
+- [Bullet 3]
+
+**What "Good" Looks Like Today Across Market Leaders:**
+I. [Competitor 1]
+[Detailed explanation]
+
+II. [Competitor 2]
+[Detailed explanation]
+
+III. [Competitor 3]
+[Detailed explanation]
+
+IV. [Competitor 4 if relevant]
+[Detailed explanation]
+
+**Challenges faced by {company_name} in [Business Line Name]:**
+- [Challenge 1]
+- [Challenge 2]
+- [Challenge 3]
+
+**Strategic AI Reinvention and ROI:**
+- **Strategic Theme:** [One line]
+- **Tangible Value / ROI:** [Quantified business impact]
+- **5 Daily AI-Driven Nudges:**
+  1. [Nudge 1]
+  2. [Nudge 2]
+  3. [Nudge 3]
+  4. [Nudge 4]
+  5. [Nudge 5]
+- **What to do to deliver:** [Execution recommendation]
+
+After ALL business lines, output this heading exactly:
+SUMMARY OF QUANTIFIED IMPACT (ANNUAL)
+
+Then provide this exact table:
+| Business Unit | Primary Hard ROI Metric | Estimated Annual Dollar Impact |
+|---|---|---:|
+
+FINAL RULES
+- The answer must contain 3 to 5 business lines only
+- Every business line must follow the exact same structure
+- Do not output any text after the final summary table
+"""
+
+BI_STRUCTURE_FIX_PROMPT = """
+You are a strict formatting and structure editor.
+
+Your task is to rewrite the Business Intelligence content below so that it follows the REQUIRED STRUCTURE exactly.
+
+Do not change the company-specific substance unless necessary.
+Do not add new fluff.
+Do not shorten depth.
+Do not remove quantified insights.
+Only fix structure, labels, order, and consistency.
+
+REQUIRED STRUCTURE:
+1. Heading: TOP BUSINESS LINES AND REVENUE
+2. Revenue table:
+| Business Line | Estimated Revenue | Notes |
+|---|---:|---|
+3. For each business line:
+## [Business Line Name]
+
+**Market Leaders:**
+**What "Good" Looks Like Today in [Company]:**
+**What "Good" Looks Like Today Across Market Leaders:**
+**Challenges faced by [Company] in [Business Line Name]:**
+**Strategic AI Reinvention and ROI:**
+4. Final heading: SUMMARY OF QUANTIFIED IMPACT (ANNUAL)
+5. Final summary table:
+| Business Unit | Primary Hard ROI Metric | Estimated Annual Dollar Impact |
+|---|---|---:|
+
+COMPANY NAME:
+{company_name}
+
+BUSINESS INTELLIGENCE DRAFT:
+{bi_text}
 """
 
 LEADERSHIP_EXTRACTION_PROMPT = """
@@ -360,6 +475,7 @@ Rules:
 - sector must be one of: Financial Services, Semiconductor, Media, Telecom, Manufacturing, Healthcare, Retail
 - Extract ALL meaningful value drivers from the BI
 - estimated_weight_pct across business_units should sum close to 100
+- Do not invent fake value drivers just to reach a target count
 - Output JSON only
 
 COMPANY NAME:
@@ -378,6 +494,8 @@ Do NOT rewrite style.
 Do NOT change structure.
 Do NOT shorten text.
 Only replace incorrect numbers, percentages, totals, and repeated values.
+Do not add zeros.
+Do not add $0.0M or 0.0% placeholders.
 
 BUSINESS INTELLIGENCE CONTEXT:
 {business_intelligence}
@@ -413,6 +531,9 @@ IMPORTANT SOURCE RULES
 - Insert them exactly where relevant.
 - Do not modify table values.
 
+- If a section does not have sufficient support from the Business Intelligence or Financial Summary, do not invent content and do not insert zero-value placeholders.
+- Do not include any table row with 0, 0.0, or $0.0M unless that value is explicitly supported by the Financial Summary JSON.
+
 CLIENT NAME:
 {company_name}
 
@@ -428,10 +549,12 @@ VERBATIM FINANCIAL TABLES:
 Write EXACTLY this structure and do not skip headings:
 
 TITLE PAGE
-COMPREHENSIVE APPLICATION PORTFOLIO ANALYSIS & 5-YEAR TRANSFORMATION PARTNERSHIP
-A Joint Proposal from Deloitte & Tholons to {company_name}
 
 EXECUTIVE SUMMARY
+- Strategic Imperative
+- Portfolio Facts
+- Investment Overview
+- Value Proposition
 
 PART 1: APPLICATION PORTFOLIO ANALYSIS
 1.1 Application Portfolio Composition & Characteristics
@@ -449,6 +572,9 @@ Rules for Batch 1:
 - Insert technology stack distribution table in 1.2
 - For each business unit deep dive, write 3 to 6 systems
 - End each business unit with a Quantifiable Impact table using value drivers relevant to that unit
+- Do not add extra headings
+- Do not add methodology
+- Do not add explanatory notes before or after the requested sections
 
 START with:
 BATCH 1: Writing Executive Summary and Part 1. All numbers from Financial Summary.
@@ -475,6 +601,9 @@ IMPORTANT SOURCE RULES
 - The financial tables below are prebuilt.
 - Insert them exactly where relevant.
 - Do not modify table values.
+
+- If a section does not have sufficient support from the Business Intelligence or Financial Summary, do not invent content and do not insert zero-value placeholders.
+- Do not include any table row with 0, 0.0, or $0.0M unless that value is explicitly supported by the Financial Summary JSON.
 
 CLIENT NAME:
 {company_name}
@@ -729,6 +858,9 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         annual_impact_m = computed_annual_impact if computed_annual_impact > 0 else extracted_annual_impact
         annual_impact_m = round1(annual_impact_m)
 
+        if annual_impact_m <= 0:
+            continue
+
         if base_m > 0 and improvement_decimal > 0:
             formula = f"{round1(base_m)} x {round1(improvement_pct_display)}% = {annual_impact_m}"
         else:
@@ -745,18 +877,10 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
             }
         )
 
-    while len(value_drivers) < 4:
-        idx = len(value_drivers) + 1
-        synthetic_impact = round1(max(annual_maintenance_m * 0.12, 10.0))
-        value_drivers.append(
-            {
-                "business_unit": f"Business Unit {idx}",
-                "driver_name": f"Operational Efficiency Driver {idx}",
-                "revenue_or_cost_base_m": round1(annual_maintenance_m),
-                "improvement_pct": 12.0,
-                "annual_impact_m": synthetic_impact,
-                "formula": f"{round1(annual_maintenance_m)} x 12.0% = {synthetic_impact}",
-            }
+    if len(value_drivers) < 4:
+        raise ValueError(
+            "Not enough valid value drivers were extracted from the Business Intelligence. "
+            "Please improve the BI output before generating the ADM."
         )
 
     total_annual_value_m = round1(sum(v["annual_impact_m"] for v in value_drivers))
@@ -1123,24 +1247,34 @@ def build_business_value_creation_table(fs: Dict[str, Any]) -> str:
     header = f"| Value Driver | {unit_names[0]} | {unit_names[1]} | Total |"
     sep = "|---|---:|---:|---:|"
 
+    def total_of(mp: Dict[str, float]) -> float:
+        return sum(mp.values())
+
     def row(label: str, mp: Dict[str, float]) -> str:
-        total = sum(mp.values())
-        return f"| {label} | {mfmt(mp.get(unit_names[0], 0.0))} | {mfmt(mp.get(unit_names[1], 0.0))} | {mfmt(total)} |"
+        return (
+            f"| {label} | {mfmt_or_na(mp.get(unit_names[0], 0.0))} | "
+            f"{mfmt_or_na(mp.get(unit_names[1], 0.0))} | "
+            f"{mfmt_or_na(total_of(mp))} |"
+        )
+
+    rows = []
+    if total_of(rev_map) > 0:
+        rows.append(row("Revenue Growth", rev_map))
+    if total_of(cost_map) > 0:
+        rows.append(row("Cost Reduction", cost_map))
+    if total_of(risk_map) > 0:
+        rows.append(row("Risk Mitigation", risk_map))
+    if total_of(retain_map) > 0:
+        rows.append(row("Asset Retention", retain_map))
 
     total_map = {
         unit_names[0]: rev_map.get(unit_names[0], 0.0) + cost_map.get(unit_names[0], 0.0) + risk_map.get(unit_names[0], 0.0) + retain_map.get(unit_names[0], 0.0),
         unit_names[1]: rev_map.get(unit_names[1], 0.0) + cost_map.get(unit_names[1], 0.0) + risk_map.get(unit_names[1], 0.0) + retain_map.get(unit_names[1], 0.0),
     }
 
-    return "\n".join([
-        header,
-        sep,
-        row("Revenue Growth", rev_map),
-        row("Cost Reduction", cost_map),
-        row("Risk Mitigation", risk_map),
-        row("Asset Retention", retain_map),
-        row("TOTAL VALUE", total_map),
-    ])
+    rows.append(row("TOTAL VALUE", total_map))
+
+    return "\n".join([header, sep] + rows)
 
 
 def build_all_financial_tables_text(fs: Dict[str, Any]) -> str:
@@ -1179,7 +1313,14 @@ def extract_leadership_json(client: GeminiClient, leadership_text: str) -> str:
 
 
 def generate_bi(client: GeminiClient, company_name: str) -> str:
-    return client.generate(BI_PROMPT.format(company_name=company_name))
+    raw_bi = client.generate(BI_PROMPT.format(company_name=company_name))
+    fixed_bi = client.generate(
+        BI_STRUCTURE_FIX_PROMPT.format(
+            company_name=company_name,
+            bi_text=raw_bi
+        )
+    )
+    return fixed_bi
 
 
 def generate_storylines(
@@ -1309,8 +1450,14 @@ if "adm_batch" not in st.session_state:
 # ============================================================
 
 st.sidebar.header("Configuration")
-api_key = st.sidebar.text_input("Gemini API Key", type="password")
-model_name = st.sidebar.text_input("Model", value="gemini-3.1-pro-preview")
+
+api_key = HARDCODED_GEMINI_API_KEY.strip()
+if not api_key:
+    api_key = st.sidebar.text_input("Gemini API Key", type="password")
+
+model_name = DEFAULT_MODEL_NAME
+st.sidebar.text_input("Model", value=model_name, disabled=True)
+
 company_name = st.sidebar.text_input("Target Company Name")
 
 st.sidebar.markdown("### Leadership Mapping Text")
