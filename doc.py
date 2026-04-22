@@ -726,7 +726,13 @@ def financial_extract_node(state: AdmFinancialState) -> AdmFinancialState:
 
     raw = client.generate(base_prompt)
     cleaned = clean_json_response(raw)
-    extracted = json.loads(cleaned)
+
+    try:
+        extracted = json.loads(cleaned)
+    except Exception as e:
+        return {
+            "error": f"JSON parsing failed: {str(e)}\nRaw output:\n{cleaned}"
+        }
 
     def extracted_has_bad_zeros(data: Dict[str, Any]) -> bool:
         facts = data.get("company_facts", {})
@@ -754,13 +760,20 @@ STRICT RETRY INSTRUCTION:
 """
         raw = client.generate(retry_prompt)
         cleaned = clean_json_response(raw)
-        extracted = json.loads(cleaned)
+
+        try:
+            extracted = json.loads(cleaned)
+        except Exception as e:
+            return {
+                "error": f"Retry JSON parsing failed: {str(e)}\nRaw output:\n{cleaned}"
+            }
 
     if extracted.get("error"):
-        raise ValueError(extracted["error"])
+        return {
+            "error": f"Extraction failed: {extracted['error']}"
+        }
 
     return {"extracted_inputs": extracted}
-
 def build_business_unit_allocations(
     business_units: List[Dict[str, Any]],
     value_drivers: List[Dict[str, Any]],
