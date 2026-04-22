@@ -26,7 +26,7 @@ except ImportError:
 # CONFIG
 # ============================================================
 
-HARDCODED_GEMINI_API_KEY = "AIzaSyCqfUjHZ_6xBicwOF_jFIxN8nR1kjzGVj0" 
+HARDCODED_GEMINI_API_KEY = "" 
 DEFAULT_MODEL_NAME = "gemini-3.1-pro-preview"
 
 
