@@ -26,7 +26,7 @@ except ImportError:
 # CONFIG
 # ============================================================
 
-HARDCODED_GEMINI_API_KEY = "" 
+HARDCODED_GEMINI_API_KEY = ""
 DEFAULT_MODEL_NAME = "gemini-3.1-pro-preview"
 
 
@@ -174,6 +174,8 @@ def pfmt_or_na(x: Any) -> str:
         return f"{round(x, 1)}%"
     except Exception:
         return "N/A"
+
+
 def contains_bad_zero_values(text: str) -> bool:
     bad_patterns = [
         r"\$0(?:\.0+)?M",
@@ -187,6 +189,7 @@ def contains_bad_zero_values(text: str) -> bool:
 def assert_no_bad_zero_values(text: str, label: str) -> None:
     if contains_bad_zero_values(text):
         raise ValueError(f"{label} contains unsupported zero values. Recalculate and regenerate.")
+
 
 def allocate_component_total(total: float, weights: List[float]) -> List[float]:
     total = round1(total)
@@ -456,32 +459,32 @@ NO markdown.
 NO explanations.
 
 Schema:
-{
-  "company_facts": {
+{{
+  "company_facts": {{
     "employee_count": 0,
     "annual_revenue_m": 0,
     "sector": "",
     "legacy_level": "high | moderate | low",
     "scope_preference": "light | medium | heavy"
-  },
+  }},
   "business_units": [
-    {
+    {{
       "name": "",
       "estimated_weight_pct": 0
-    }
+    }}
   ],
   "value_drivers": [
-    {
+    {{
       "business_unit": "",
       "driver_name": "",
       "revenue_or_cost_base_m": 0,
       "improvement_pct": 0,
       "annual_impact_m": 0,
       "source_logic": ""
-    }
+    }}
   ],
   "error": ""
-}
+}}
 
 Rules:
 - annual_revenue_m must be in millions
@@ -774,6 +777,8 @@ STRICT RETRY INSTRUCTION:
         }
 
     return {"extracted_inputs": extracted}
+
+
 def build_business_unit_allocations(
     business_units: List[Dict[str, Any]],
     value_drivers: List[Dict[str, Any]],
@@ -873,11 +878,12 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     business_units = extracted.get("business_units", [])
     value_drivers_raw = extracted.get("value_drivers", [])
 
-    employee_count = safe_int(facts.get("employee_count"), 10000)
-    annual_revenue_m = safe_float(facts.get("annual_revenue_m"), 1000.0)
+    employee_count = safe_int(facts.get("employee_count"), 0)
+    annual_revenue_m = safe_float(facts.get("annual_revenue_m"), 0.0)
     sector = facts.get("sector", "Manufacturing")
+
     if employee_count <= 0:
-        raise ValueError("Employee count was not extracted with a valid non- zero value.")
+        raise ValueError("Employee count was not extracted with a valid non-zero value.")
     if annual_revenue_m <= 0:
         raise ValueError("Annual revenue was not extracted with a valid non-zero value.")
     if sector not in SECTOR_APP_RATIOS:
@@ -1445,6 +1451,7 @@ STRICT RETRY:
     assert_no_bad_zero_values(final_text, "ADM output")
     return final_text
 
+
 def generate_adm_batch1(
     client: GeminiClient,
     company_name: str,
@@ -1468,6 +1475,7 @@ def generate_adm_batch1(
     )
     assert_no_bad_zero_values(corrected, "ADM Batch 1")
     return corrected
+
 
 def generate_adm_next_batch(
     client: GeminiClient,
@@ -1496,6 +1504,7 @@ def generate_adm_next_batch(
     )
     assert_no_bad_zero_values(corrected, f"ADM Batch {next_batch_number}")
     return corrected
+
 
 # ============================================================
 # SESSION STATE
@@ -1533,6 +1542,8 @@ if "adm_batch" not in st.session_state:
 st.sidebar.header("Configuration")
 
 api_key = HARDCODED_GEMINI_API_KEY.strip()
+if not api_key:
+    api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
