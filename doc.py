@@ -4,7 +4,7 @@ import io
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict, Literal
 
 import streamlit as st
 from docx import Document
@@ -21,6 +21,13 @@ except ImportError:
     StateGraph = None
     END = None
 
+try:
+    from pydantic import BaseModel, Field, ValidationError
+except ImportError:
+    BaseModel = object
+    Field = None
+    ValidationError = Exception
+
 
 # ============================================================
 # CONFIG
@@ -28,7 +35,6 @@ except ImportError:
 
 HARDCODED_GEMINI_API_KEY = ""
 DEFAULT_MODEL_NAME = "gemini-3.1-pro-preview"
-
 
 st.set_page_config(page_title="Company Document Generator", layout="wide")
 st.title("Company Document Generator")
@@ -54,6 +60,43 @@ class AdmFinancialState(TypedDict, total=False):
     extracted_inputs: Dict[str, Any]
     financial_summary: Dict[str, Any]
     error: str
+
+
+class CompanyFactsSchema(BaseModel):
+    employee_count: int
+    annual_revenue_m: float
+    sector: str
+    legacy_level: str
+    scope_preference: str
+
+
+class BusinessUnitSchema(BaseModel):
+    name: str
+    estimated_weight_pct: float
+
+
+class ValueDriverSchema(BaseModel):
+    business_unit: str
+    driver_name: str
+    revenue_or_cost_base_m: float
+    improvement_pct: float
+    annual_impact_m: float
+    source_logic: str
+
+
+class FinancialExtractionSchema(BaseModel):
+    company_facts: CompanyFactsSchema
+    business_units: List[BusinessUnitSchema]
+    value_drivers: List[ValueDriverSchema]
+    error: str = ""
+
+
+class ValidationReportSchema(BaseModel):
+    status: Literal["PASSED", "FAILED"]
+    financial_errors: List[str] = []
+    adm_errors: List[str] = []
+    bi_errors: List[str] = []
+    warnings: List[str] = []
 
 
 # ============================================================
@@ -222,6 +265,17 @@ def find_payback_years(investment: float, annual_value: float) -> float:
     return 5.0
 
 
+def approx_equal(a: float, b: float, tolerance: float = 0.2) -> bool:
+    return abs(round1(a) - round1(b)) <= tolerance
+
+
+def parse_money_values_m(text: str) -> List[float]:
+    values = []
+    for match in re.findall(r"\$([\d,]+(?:\.\d+)?)\s*M", text):
+        values.append(safe_float(match))
+    return values
+
+
 # ============================================================
 # GEMINI CLIENT
 # ============================================================
@@ -266,119 +320,103 @@ class GeminiClient:
 BI_PROMPT = """
 You are a senior enterprise strategy consultant.
 
-Your task is to generate a complete Business Intelligence document for the company below.
+Generate a complete Business Intelligence document for:
 
 Company Name: {company_name}
 
-STRICT OUTPUT RULES
-- Identify exactly 3 to 5 top business lines only
-- Business lines must be FUNCTIONAL, not geographic
-- If business lines are based on geography, regenerate internally before answering
-- Do not include any introduction, disclaimer, methodology note, or conclusion before the business lines
-- Start directly with the business lines
-- Keep the structure exactly as specified below
-- Use the exact section labels below
-- Do not skip any section
-- Do not merge sections
-- Do not change the order
-- Do not use placeholder text
-- Do not use generic filler
-- Quantify impact wherever possible
-- Be specific to the company
+STRICT RULES
+- Identify exactly 3 to 5 top business lines only.
+- Business lines must be functional, not geographic.
+- If business lines are geography-based, regenerate internally before answering.
+- Do not mention or copy any example company.
+- Do not use placeholder text.
+- Do not include methodology notes.
+- Start directly with Section 1.
+- Every business line must follow the exact same structure.
+- The final summary table must include percentage improvement or ROI-style metric and dollar impact.
 
 REQUIRED OUTPUT STRUCTURE
 
-First, output this heading exactly:
-TOP BUSINESS LINES AND REVENUE
+1. [Business Line Name]
 
-Then provide a table in this exact format:
-| Business Line | Estimated Revenue | Notes |
-|---|---:|---|
+Market Leaders: [List 4 named competitors.]
 
-After the table, create a separate full section for EACH business line using this exact structure:
+What "Good" Looks Like Today in {company_name}:
+· [Bullet 1]
+· [Bullet 2]
+· [Bullet 3]
 
-## [Business Line Name]
+What “Good” Looks Like Today Across Market Leaders:
+I. [Competitor 1] The "[Benchmark Theme]" Benchmark
+· [Specific benchmark explanation]
+· [Specific benchmark explanation]
 
-**Market Leaders:** [List named competitors]
+II. [Competitor 2] The "[Benchmark Theme]" Benchmark
+· [Specific benchmark explanation]
+· [Specific benchmark explanation]
 
-**What "Good" Looks Like Today in {company_name}:**
-- [Bullet 1]
-- [Bullet 2]
-- [Bullet 3]
+III. [Competitor 3] The "[Benchmark Theme]" Benchmark
+· [Specific benchmark explanation]
+· [Specific benchmark explanation]
 
-**What "Good" Looks Like Today Across Market Leaders:**
-I. [Competitor 1]
-[Detailed explanation]
+IV. [Competitor 4] The "[Benchmark Theme]" Benchmark
+· [Specific benchmark explanation]
+· [Specific benchmark explanation]
 
-II. [Competitor 2]
-[Detailed explanation]
+Challenges faced by {company_name} in [Business Line Name]:
+· [Challenge 1]
+· [Challenge 2]
+· [Challenge 3]
 
-III. [Competitor 3]
-[Detailed explanation]
+Strategic AI Reinvention and ROI [Business Line Name]: [Theme Name]
+Focus: [One focused sentence.]
 
-IV. [Competitor 4 if relevant]
-[Detailed explanation]
+· Tangible Value/ROI: [Percentage improvement with estimated dollar logic.]
+· KYC & Risk Impact or Operational Impact: [Percentage improvement with estimated dollar logic.]
+· 5 Daily AI-Driven Nudges:
+1. [Nudge 1]
+2. [Nudge 2]
+3. [Nudge 3]
+4. [Nudge 4]
+5. [Nudge 5]
+· What to do to deliver: [Implementation recommendation.]
 
-**Challenges faced by {company_name} in [Business Line Name]:**
-- [Challenge 1]
-- [Challenge 2]
-- [Challenge 3]
+Repeat the above structure for each business line.
 
-**Strategic AI Reinvention and ROI:**
-- **Strategic Theme:** [One line]
-- **Tangible Value / ROI:** [Quantified business impact]
-- **5 Daily AI-Driven Nudges:**
-  1. [Nudge 1]
-  2. [Nudge 2]
-  3. [Nudge 3]
-  4. [Nudge 4]
-  5. [Nudge 5]
-- **What to do to deliver:** [Execution recommendation]
+Summary of Quantified Impact Annual
 
-After ALL business lines, output this heading exactly:
-SUMMARY OF QUANTIFIED IMPACT (ANNUAL)
-
-Then provide this exact table:
-| Business Unit | Primary Hard ROI Metric | Estimated Annual Dollar Impact |
-|---|---|---:|
+| Business Unit | Primary Hard ROI Metric | Percentage ROI / Improvement | Estimated Annual Dollar Impact (USD) |
+|---|---|---:|---:|
+| [Business Unit 1] | [Metric name] | [+X% / -Y%] | $XM - $YM |
+| [Business Unit 2] | [Metric name] | [+X% / -Y%] | $XM - $YM |
+| [Business Unit 3] | [Metric name] | [+X% / -Y%] | $XM - $YM |
 
 FINAL RULES
-- The answer must contain 3 to 5 business lines only
-- Every business line must follow the exact same structure
-- Do not output any text after the final summary table
+- No text after the final summary table.
+- The final table must not omit percentage ROI or improvement.
+- Do not mention any example company.
 """
 
 BI_STRUCTURE_FIX_PROMPT = """
-You are a strict formatting and structure editor.
+You are a strict structure editor.
 
-Your task is to rewrite the Business Intelligence content below so that it follows the REQUIRED STRUCTURE exactly.
-
-Do not change the company-specific substance unless necessary.
-Do not add new fluff.
-Do not shorten depth.
-Do not remove quantified insights.
-Only fix structure, labels, order, and consistency.
-
-REQUIRED STRUCTURE:
-1. Heading: TOP BUSINESS LINES AND REVENUE
-2. Revenue table:
-| Business Line | Estimated Revenue | Notes |
-|---|---:|---|
-3. For each business line:
-## [Business Line Name]
-
-**Market Leaders:**
-**What "Good" Looks Like Today in [Company]:**
-**What "Good" Looks Like Today Across Market Leaders:**
-**Challenges faced by [Company] in [Business Line Name]:**
-**Strategic AI Reinvention and ROI:**
-4. Final heading: SUMMARY OF QUANTIFIED IMPACT (ANNUAL)
-5. Final summary table:
-| Business Unit | Primary Hard ROI Metric | Estimated Annual Dollar Impact |
-|---|---|---:|
+Rewrite the BI content below so it follows the required structure exactly.
+Do not mention or copy any example company.
+Do not remove useful quantified details.
+Do not add disclaimers.
 
 COMPANY NAME:
 {company_name}
+
+REQUIRED STRUCTURE:
+1. [Business Line Name]
+Market Leaders:
+What "Good" Looks Like Today in [Company]:
+What “Good” Looks Like Today Across Market Leaders:
+Challenges faced by [Company] in [Business Line Name]:
+Strategic AI Reinvention and ROI [Business Line Name]:
+Summary of Quantified Impact Annual table with columns:
+| Business Unit | Primary Hard ROI Metric | Percentage ROI / Improvement | Estimated Annual Dollar Impact (USD) |
 
 BUSINESS INTELLIGENCE DRAFT:
 {bi_text}
@@ -453,6 +491,7 @@ You are a strict extraction engine for ADM financial inputs.
 
 The Business Intelligence document below has already been generated.
 Do NOT rewrite it. Do NOT summarize it.
+Do NOT mention or copy any example company.
 
 Return ONLY valid JSON.
 NO markdown.
@@ -487,16 +526,16 @@ Schema:
 }}
 
 Rules:
-- annual_revenue_m must be in millions
-- sector must be one of: Financial Services, Semiconductor, Media, Telecom, Manufacturing, Healthcare, Retail
-- Extract ALL meaningful value drivers from the BI
-- estimated_weight_pct across business_units should sum close to 100
-- Do not invent fake value drivers just to reach a target count
-- Output JSON only
-- NEVER output 0 for employee_count, annual_revenue_m, revenue_or_cost_base_m, annual_impact_m, or improvement_pct unless explicitly stated in the BI
-- If a company fact is missing, estimate it from the BI and public scale cues
-- If a value driver is weak or incomplete, derive the annual impact using the best available base and percentage
-- If you cannot support at least 4 value drivers with non-zero annual impact, return an error object instead of zero-filled rows
+- annual_revenue_m must be in millions.
+- sector must be one of: Financial Services, Semiconductor, Media, Telecom, Manufacturing, Healthcare, Retail.
+- Extract all meaningful value drivers from the BI.
+- estimated_weight_pct across business_units should sum close to 100.
+- Do not invent fake value drivers just to reach a target count.
+- Output JSON only.
+- Never output 0 for employee_count, annual_revenue_m, revenue_or_cost_base_m, annual_impact_m, or improvement_pct unless explicitly stated in the BI.
+- If a company fact is missing, estimate it from the BI and public scale cues.
+- If a value driver is weak or incomplete, derive the annual impact using the best available base and percentage.
+- If you cannot support at least 4 value drivers with non-zero annual impact, return an error object instead of zero-filled rows.
 
 COMPANY NAME:
 {company_name}
@@ -516,6 +555,7 @@ Do NOT shorten text.
 Only replace incorrect numbers, percentages, totals, and repeated values.
 Do not add zeros.
 Do not add $0.0M or 0.0% placeholders.
+Do not mention or copy any example company.
 
 BUSINESS INTELLIGENCE CONTEXT:
 {business_intelligence}
@@ -536,28 +576,19 @@ ADM_BATCH1_PROMPT = """
 You are writing an ADM proposal.
 
 IMPORTANT SOURCE RULES
-- The Business Intelligence document below has ALREADY been generated.
-- Do NOT regenerate the Business Intelligence.
-- Do NOT rewrite or replace the Business Intelligence.
-- Use it only as source context.
-
-- The Financial Summary JSON below is the ONLY source of truth for all numbers.
-- If a number is needed, copy it exactly.
-- Do NOT recalculate.
-- Do NOT invent.
-- Do NOT change any number.
-
-- The financial tables below are prebuilt.
-- Insert them exactly where relevant.
-- Do not modify table values.
-
-- If a section does not have sufficient support from the Business Intelligence or Financial Summary, do not invent content and do not insert zero-value placeholders.
-- Do not include any table row with 0, 0.0, or $0.0M unless that value is explicitly supported by the Financial Summary JSON.
+- The Business Intelligence document below has already been generated.
+- Do not regenerate the BI.
+- Do not mention or copy any example company.
+- Use BI only as source context.
+- The Financial Summary JSON below is the only source of truth for all numbers.
+- Do not recalculate, invent, or alter any number.
+- Insert the financial tables exactly where relevant.
+- If a section does not have support from BI or Financial Summary, omit unsupported zero-value rows.
 
 CLIENT NAME:
 {company_name}
 
-BUSINESS INTELLIGENCE DOCUMENT (ALREADY GENERATED - USE AS CONTEXT ONLY):
+BUSINESS INTELLIGENCE DOCUMENT:
 {business_intelligence}
 
 FINANCIAL SUMMARY JSON:
@@ -566,35 +597,29 @@ FINANCIAL SUMMARY JSON:
 VERBATIM FINANCIAL TABLES:
 {financial_tables_text}
 
-Write EXACTLY this structure and do not skip headings:
+Write EXACTLY this structure:
 
-TITLE PAGE
+COMPREHENSIVE APPLICATION PORTFOLIO ANALYSIS & 5-YEAR TRANSFORMATION PARTNERSHIP
+A Joint Proposal from Deloitte & Tholons to {company_name}
 
-EXECUTIVE SUMMARY
-- Strategic Imperative
-- Portfolio Facts
-- Investment Overview
-- Value Proposition
+EXECUTIVE SUMMARY: THE STRATEGIC IMPERATIVE
 
-PART 1: APPLICATION PORTFOLIO ANALYSIS
+PART 1: DETAILED APPLICATION PORTFOLIO ANALYSIS
 1.1 Application Portfolio Composition & Characteristics
-1.2 Technology Stack Distribution
-1.3 First Business Unit Deep Dive
-1.4 Second Business Unit Deep Dive
-1.5 Third Business Unit Deep Dive if applicable
-1.6 Fourth Business Unit Deep Dive if applicable
+1.2 [Business Unit 1] Deep Dive
+1.3 [Business Unit 2] Deep Dive
+1.4 [Business Unit 3] Deep Dive if applicable
+1.5 [Business Unit 4] Deep Dive if applicable
+1.6 [Business Unit 5] Deep Dive if applicable
 
-Rules for Batch 1:
-- Use the BI for narrative only
-- Use the financial summary JSON for every number
-- Insert Table 1 in 1.1
-- Insert business unit allocation table in 1.1
-- Insert technology stack distribution table in 1.2
-- For each business unit deep dive, write 3 to 6 systems
-- End each business unit with a Quantifiable Impact table using value drivers relevant to that unit
-- Do not add extra headings
-- Do not add methodology
-- Do not add explanatory notes before or after the requested sections
+Rules:
+- Executive Summary must include strategic imperative, app count, maintenance, tech debt, investment, ROI, cumulative savings, and annual business value.
+- 1.1 must include Portfolio Distribution by Business Unit and Technology Stack Distribution.
+- Each business unit deep dive must include 3 to 6 systems.
+- Each system must include purpose, technology stack, current state issues, maintenance cost, and market comparison.
+- End every business unit with Quantifiable Impact table.
+- Do not add extra headings.
+- Do not add methodology notes.
 
 START with:
 BATCH 1: Writing Executive Summary and Part 1. All numbers from Financial Summary.
@@ -606,24 +631,12 @@ BATCH 1 complete. Say 'continue' for the next batch.
 ADM_CONTINUE_PROMPT = """
 You are continuing an ADM proposal.
 
-IMPORTANT SOURCE RULES
-- The Business Intelligence document below has ALREADY been generated.
-- Do NOT regenerate the Business Intelligence.
-- Do NOT rewrite or replace the Business Intelligence.
-- Use it only as source context.
-
-- The Financial Summary JSON below is the ONLY source of truth for all numbers.
-- If a number is needed, copy it exactly.
-- Do NOT recalculate.
-- Do NOT invent.
-- Do NOT change any number.
-
-- The financial tables below are prebuilt.
-- Insert them exactly where relevant.
-- Do not modify table values.
-
-- If a section does not have sufficient support from the Business Intelligence or Financial Summary, do not invent content and do not insert zero-value placeholders.
-- Do not include any table row with 0, 0.0, or $0.0M unless that value is explicitly supported by the Financial Summary JSON.
+SOURCE RULES
+- Do not regenerate the BI.
+- Do not mention or copy any example company.
+- The Financial Summary JSON is the only source of truth for numbers.
+- Do not recalculate, invent, or change numbers.
+- Do not add zero-value placeholders.
 
 CLIENT NAME:
 {company_name}
@@ -640,42 +653,38 @@ VERBATIM FINANCIAL TABLES:
 ALREADY GENERATED ADM CONTENT:
 {current_adm_text}
 
-TASK
 Continue with BATCH {next_batch_number} only.
 
-Required hardcoded structure by batch:
-
 BATCH 2
-PART 2: COMPETITIVE BENCHMARKING
-Create a separate benchmarking section and comparison table for EACH business unit.
+PART 2: COMPETITIVE BENCHMARKING AGAINST MARKET LEADERS
+Create one separate benchmarking section per business unit.
+Each section must have a comparison table and quantified impact sentence.
 
 BATCH 3
-PART 3: 5-YEAR PARTNERSHIP DEAL STRUCTURE
+PART 3: 5-YEAR TRANSFORMATION PARTNERSHIP DEAL STRUCTURE
 3.1 Partnership Overview & Commercial Terms
 3.2 Year-by-Year Investment & Delivery Roadmap
 Write Year 1, Year 2, Year 3, Year 4, Year 5 separately.
 
 BATCH 4
 3.3 Detailed Financial Model
-- Insert Table 5-Year Investment Profile exactly
-- Insert Business Value Creation table
-- Insert Return on Investment Analysis table
-3.4 Offshore Delivery Model
-- Insert blended rate table exactly
-- Write 3 delivery centers
+TABLE A: 5-Year Investment Profile
+TABLE B: Business Value Creation
+TABLE C: Return on Investment Analysis
+3.4 Offshore Delivery Model & Cost Advantage
 
 BATCH 5
 3.5 Governance & Operating Model
-3.6 Risk Mitigation
+3.6 Risk Mitigation Framework
 3.7 Transition Approach
-3.8 Success Metrics
+3.8 Success Metrics & Performance Dashboard
 
 BATCH 6
-PART 4: CONCLUSION
-4.1 Competitive Imperative
-4.2 Partnership Advantage
+PART 4: CONCLUSION & STRATEGIC IMPERATIVES
+4.1 The Competitive Imperative
+4.2 The Partnership Advantage
 4.3 Critical Success Factors
-4.4 Next Steps
+4.4 Recommended Next Steps
 4.5 Final Investment Summary
 APPENDICES
 FOOTER
@@ -719,6 +728,31 @@ LEGACY_MULTIPLIERS = {
 }
 
 
+def validate_financial_extraction_with_pydantic(data: Dict[str, Any]) -> FinancialExtractionSchema:
+    try:
+        parsed = FinancialExtractionSchema(**data)
+    except ValidationError as e:
+        raise ValueError(f"Pydantic financial extraction validation failed: {e}")
+
+    if parsed.error:
+        raise ValueError(parsed.error)
+
+    if parsed.company_facts.employee_count <= 0:
+        raise ValueError("Employee count must be non-zero.")
+    if parsed.company_facts.annual_revenue_m <= 0:
+        raise ValueError("Annual revenue must be non-zero.")
+    if len(parsed.value_drivers) < 4:
+        raise ValueError("At least 4 non-zero value drivers are required.")
+
+    for driver in parsed.value_drivers:
+        if driver.annual_impact_m <= 0:
+            raise ValueError(f"Value driver has zero impact: {driver.driver_name}")
+        if driver.improvement_pct <= 0:
+            raise ValueError(f"Value driver has zero improvement percentage: {driver.driver_name}")
+
+    return parsed
+
+
 def financial_extract_node(state: AdmFinancialState) -> AdmFinancialState:
     client = st.session_state._gemini_client
 
@@ -733,9 +767,7 @@ def financial_extract_node(state: AdmFinancialState) -> AdmFinancialState:
     try:
         extracted = json.loads(cleaned)
     except Exception as e:
-        return {
-            "error": f"JSON parsing failed: {str(e)}\nRaw output:\n{cleaned}"
-        }
+        return {"error": f"JSON parsing failed: {str(e)}\nRaw output:\n{cleaned}"}
 
     def extracted_has_bad_zeros(data: Dict[str, Any]) -> bool:
         facts = data.get("company_facts", {})
@@ -745,10 +777,7 @@ def financial_extract_node(state: AdmFinancialState) -> AdmFinancialState:
             return True
 
         drivers = data.get("value_drivers", [])
-        non_zero_drivers = 0
-        for d in drivers:
-            if safe_float(d.get("annual_impact_m")) > 0:
-                non_zero_drivers += 1
+        non_zero_drivers = sum(1 for d in drivers if safe_float(d.get("annual_impact_m")) > 0)
         return non_zero_drivers < 4
 
     if extracted.get("error") or extracted_has_bad_zeros(extracted):
@@ -758,8 +787,8 @@ STRICT RETRY INSTRUCTION:
 - Your previous output contained zero, missing, or unusable financial values.
 - Recalculate and re-estimate all missing company facts.
 - Return at least 4 non-zero value drivers.
-- Do NOT output any driver with annual_impact_m = 0.
-- Do NOT output employee_count = 0 or annual_revenue_m = 0.
+- Do not output any driver with annual_impact_m = 0.
+- Do not output employee_count = 0 or annual_revenue_m = 0.
 """
         raw = client.generate(retry_prompt)
         cleaned = clean_json_response(raw)
@@ -767,16 +796,14 @@ STRICT RETRY INSTRUCTION:
         try:
             extracted = json.loads(cleaned)
         except Exception as e:
-            return {
-                "error": f"Retry JSON parsing failed: {str(e)}\nRaw output:\n{cleaned}"
-            }
+            return {"error": f"Retry JSON parsing failed: {str(e)}\nRaw output:\n{cleaned}"}
 
-    if extracted.get("error"):
-        return {
-            "error": f"Extraction failed: {extracted['error']}"
-        }
+    try:
+        parsed = validate_financial_extraction_with_pydantic(extracted)
+    except Exception as e:
+        return {"error": str(e)}
 
-    return {"extracted_inputs": extracted}
+    return {"extracted_inputs": parsed.model_dump()}
 
 
 def build_business_unit_allocations(
@@ -841,14 +868,6 @@ def build_blended_rates(sector: str) -> List[Dict[str, Any]]:
         ("QA Automation Engineer", 120, 45, "10/90"),
         ("Legacy Support Specialist", 110, 40, "10/90"),
     ]
-
-    if sector == "Healthcare":
-        roles[2] = ("Senior Platform Engineer", 180, 70, "25/75")
-    elif sector == "Financial Services":
-        roles[1] = ("Business Analyst", 165, 65, "35/65")
-        roles[2] = ("Senior Engineering Lead", 185, 72, "25/75")
-    elif sector == "Manufacturing":
-        roles[3] = ("Cloud / IoT Engineer", 175, 68, "25/75")
 
     out: List[Dict[str, Any]] = []
     for role, us, india, mix in roles:
@@ -919,6 +938,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         name = vd.get("driver_name", f"Driver {idx}")
         base_m = safe_float(vd.get("revenue_or_cost_base_m"))
         improvement_pct = safe_float(vd.get("improvement_pct"))
+
         if improvement_pct > 1:
             improvement_decimal = improvement_pct / 100.0
             improvement_pct_display = improvement_pct
@@ -951,10 +971,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         )
 
     if len(value_drivers) < 4:
-        raise ValueError(
-            "Not enough valid value drivers were extracted from the Business Intelligence. "
-            "Please improve the BI output before generating the ADM."
-        )
+        raise ValueError("Not enough valid value drivers were extracted from the BI.")
 
     total_annual_value_m = round1(sum(v["annual_impact_m"] for v in value_drivers))
     five_year_value_m = round1(total_annual_value_m * 3.15)
@@ -986,9 +1003,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         "y4_m": round1(annual_maintenance_m * 0.35),
         "y5_m": round1(annual_maintenance_m * 0.38),
     }
-    cost_savings["five_year_total_m"] = round1(
-        cost_savings["y1_m"] + cost_savings["y2_m"] + cost_savings["y3_m"] + cost_savings["y4_m"] + cost_savings["y5_m"]
-    )
+    cost_savings["five_year_total_m"] = round1(sum(cost_savings.values()))
 
     blended_rates = build_blended_rates(sector)
 
@@ -1025,7 +1040,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     )
 
     payback_years = find_payback_years(investment_m, total_annual_value_m)
-    annualized_return_pct = round1((roi_pct / 5.0) if roi_pct else 0.0)
+    annualized_return_pct = round1(roi_pct / 5.0)
 
     financial_summary = {
         "base_data": {
@@ -1075,35 +1090,229 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     return {"financial_summary": financial_summary}
 
 
+# ============================================================
+# DETERMINISTIC VALIDATORS
+# ============================================================
+
+def validate_financial_math(fs: Dict[str, Any]) -> List[str]:
+    errors = []
+
+    value_driver_sum = round1(sum(v["annual_impact_m"] for v in fs["value_drivers"]))
+    if not approx_equal(value_driver_sum, fs["total_annual_value_m"]):
+        errors.append(f"Value drivers sum {mfmt(value_driver_sum)} does not match total annual value {mfmt(fs['total_annual_value_m'])}.")
+
+    expected_5yr = round1(fs["total_annual_value_m"] * 3.15)
+    if not approx_equal(expected_5yr, fs["five_year_value_m"]):
+        errors.append(f"5-year value should be {mfmt(expected_5yr)}, not {mfmt(fs['five_year_value_m'])}.")
+
+    expected_investment = round1(fs["base_data"]["annual_maintenance_m"] * fs["investment_multiplier_used"])
+    if not approx_equal(expected_investment, fs["investment_m"]):
+        errors.append(f"Investment should be {mfmt(expected_investment)}, not {mfmt(fs['investment_m'])}.")
+
+    expected_roi = round1(((fs["five_year_value_m"] - fs["investment_m"]) / fs["investment_m"]) * 100)
+    if not approx_equal(expected_roi, fs["roi_pct"]):
+        errors.append(f"ROI should be {pfmt(expected_roi)}, not {pfmt(fs['roi_pct'])}.")
+
+    c = fs["cost_savings"]
+    baseline = fs["base_data"]["annual_maintenance_m"]
+    fixed = {
+        "y1_m": 0.12,
+        "y2_m": 0.22,
+        "y3_m": 0.30,
+        "y4_m": 0.35,
+        "y5_m": 0.38,
+    }
+    for key, pct in fixed.items():
+        expected = round1(baseline * pct)
+        if not approx_equal(expected, c[key]):
+            errors.append(f"Cost savings {key} should be {mfmt(expected)}, not {mfmt(c[key])}.")
+
+    expected_savings_total = round1(c["y1_m"] + c["y2_m"] + c["y3_m"] + c["y4_m"] + c["y5_m"])
+    if not approx_equal(expected_savings_total, c["five_year_total_m"]):
+        errors.append("5-year cost savings total does not match annual savings sum.")
+
+    s = fs["investment_schedule"]
+    component_checks = [
+        ("Legacy", s["legacy_y_m"], s["legacy_total_m"]),
+        ("Modernization", s["modernization_y_m"], s["modernization_total_m"]),
+        ("Digital", s["digital_y_m"], s["digital_total_m"]),
+        ("Innovation", s["innovation_y_m"], s["innovation_total_m"]),
+    ]
+    for label, years, total in component_checks:
+        if not approx_equal(sum(years), total):
+            errors.append(f"{label} investment row does not sum to its total.")
+
+    yearly_sum = round1(sum(s["total_y_m"]))
+    if not approx_equal(yearly_sum, fs["investment_m"]):
+        errors.append("Investment schedule yearly total does not equal total investment.")
+
+    for i in range(5):
+        col_sum = round1(s["legacy_y_m"][i] + s["modernization_y_m"][i] + s["digital_y_m"][i] + s["innovation_y_m"][i])
+        if not approx_equal(col_sum, s["total_y_m"][i]):
+            errors.append(f"Investment schedule column Y{i + 1} does not sum correctly.")
+
+    p = fs["partner_split"]
+    if not approx_equal(sum(p["partner_y_m"]), p["partner_total_m"]):
+        errors.append("Partner yearly split does not sum to partner total.")
+    if not approx_equal(sum(p["client_y_m"]), p["client_total_m"]):
+        errors.append("Client yearly split does not sum to client total.")
+
+    expected_partner_total = round1(fs["investment_m"] * 0.42)
+    if not approx_equal(expected_partner_total, p["partner_total_m"]):
+        errors.append("Partner total is not 42% of total investment.")
+
+    expected_client_total = round1(fs["investment_m"] * 0.58)
+    if not approx_equal(expected_client_total, p["client_total_m"]):
+        errors.append("Client total is not 58% of total investment.")
+
+    expected_low = round1(p["partner_total_m"] * 0.18)
+    expected_high = round1(p["partner_total_m"] * 0.22)
+    if not approx_equal(expected_low, p["partner_margin_low_m"]):
+        errors.append("Partner low margin is not 18% of partner revenue.")
+    if not approx_equal(expected_high, p["partner_margin_high_m"]):
+        errors.append("Partner high margin is not 22% of partner revenue.")
+
+    return errors
+
+
+def validate_bi_structure(bi_text: str) -> List[str]:
+    errors = []
+    required = [
+        "Market Leaders:",
+        'What "Good" Looks Like Today',
+        "What “Good” Looks Like Today Across Market Leaders",
+        "Challenges faced by",
+        "Strategic AI Reinvention and ROI",
+        "Summary of Quantified Impact Annual",
+        "Percentage ROI / Improvement",
+        "Estimated Annual Dollar Impact",
+    ]
+    for item in required:
+        if item not in bi_text:
+            errors.append(f"BI missing required structure element: {item}")
+
+    if contains_bad_zero_values(bi_text):
+        errors.append("BI contains unsupported zero values.")
+
+    return errors
+
+
+def validate_adm_structure_and_numbers(adm_text: str, fs: Dict[str, Any]) -> List[str]:
+    errors = []
+
+    if contains_bad_zero_values(adm_text):
+        errors.append("ADM contains unsupported zero values.")
+
+    required_order = [
+        "EXECUTIVE SUMMARY",
+        "PART 1: DETAILED APPLICATION PORTFOLIO ANALYSIS",
+        "PART 2: COMPETITIVE BENCHMARKING",
+        "PART 3: 5-YEAR TRANSFORMATION PARTNERSHIP DEAL STRUCTURE",
+        "3.3 Detailed Financial Model",
+        "3.4 Offshore Delivery Model",
+        "3.5 Governance",
+        "3.6 Risk Mitigation",
+        "3.7 Transition",
+        "3.8 Success Metrics",
+        "PART 4: CONCLUSION",
+        "APPENDICES",
+        "Prepared for:",
+    ]
+
+    last_pos = -1
+    for section in required_order:
+        pos = adm_text.find(section)
+        if pos == -1:
+            errors.append(f"ADM missing required section: {section}")
+        elif pos < last_pos:
+            errors.append(f"ADM section appears out of order: {section}")
+        else:
+            last_pos = pos
+
+    required_numbers = [
+        fs["base_data"]["app_count"],
+        fs["base_data"]["annual_maintenance_m"],
+        fs["base_data"]["tech_debt_m"],
+        fs["investment_m"],
+        fs["total_annual_value_m"],
+        fs["five_year_value_m"],
+        fs["roi_pct"],
+        fs["cost_savings"]["five_year_total_m"],
+    ]
+
+    for num in required_numbers:
+        num_str_1 = f"{round1(num):,.1f}"
+        num_str_2 = f"{round(num):,}"
+        if num_str_1 not in adm_text and num_str_2 not in adm_text:
+            errors.append(f"ADM may be missing locked number: {num}")
+
+    expected_total = round1(sum(v["annual_impact_m"] for v in fs["value_drivers"]))
+    if not approx_equal(expected_total, fs["total_annual_value_m"]):
+        errors.append("Financial summary total annual value does not match driver sum.")
+
+    return errors
+
+
+def build_validation_report(
+    bi_text: str,
+    adm_text: str,
+    fs: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    financial_errors = []
+    adm_errors = []
+    bi_errors = []
+    warnings = []
+
+    bi_errors = validate_bi_structure(bi_text) if bi_text else ["BI has not been generated."]
+
+    if fs:
+        financial_errors = validate_financial_math(fs)
+    else:
+        financial_errors = ["Financial summary has not been generated."]
+
+    if adm_text and fs:
+        adm_errors = validate_adm_structure_and_numbers(adm_text, fs)
+    elif adm_text and not fs:
+        adm_errors = ["ADM exists but financial summary is missing."]
+    else:
+        warnings.append("ADM has not been generated yet.")
+
+    status = "PASSED" if not financial_errors and not adm_errors and not bi_errors else "FAILED"
+
+    report = ValidationReportSchema(
+        status=status,
+        financial_errors=financial_errors,
+        adm_errors=adm_errors,
+        bi_errors=bi_errors,
+        warnings=warnings,
+    )
+    return report.model_dump()
+
+
+def render_validation_report_text(report: Dict[str, Any]) -> str:
+    lines = [f"VALIDATION STATUS: {report['status']}", ""]
+
+    for label, key in [
+        ("BI ERRORS", "bi_errors"),
+        ("FINANCIAL ERRORS", "financial_errors"),
+        ("ADM ERRORS", "adm_errors"),
+        ("WARNINGS", "warnings"),
+    ]:
+        lines.append(label)
+        items = report.get(key, [])
+        if items:
+            for item in items:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- None")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def financial_validate_node(state: AdmFinancialState) -> AdmFinancialState:
     fs = state["financial_summary"]
-    schedule = fs["investment_schedule"]
-    partner = fs["partner_split"]
-
-    errors: List[str] = []
-
-    if len(fs["value_drivers"]) < 4:
-        errors.append("Less than 4 value drivers found.")
-
-    if round1(sum(v["annual_impact_m"] for v in fs["value_drivers"])) != round1(fs["total_annual_value_m"]):
-        errors.append("Total annual value does not match sum of value drivers.")
-
-    if round1(sum(schedule["legacy_y_m"])) != round1(schedule["legacy_total_m"]):
-        errors.append("Legacy schedule does not sum correctly.")
-    if round1(sum(schedule["modernization_y_m"])) != round1(schedule["modernization_total_m"]):
-        errors.append("Modernization schedule does not sum correctly.")
-    if round1(sum(schedule["digital_y_m"])) != round1(schedule["digital_total_m"]):
-        errors.append("Digital schedule does not sum correctly.")
-    if round1(sum(schedule["innovation_y_m"])) != round1(schedule["innovation_total_m"]):
-        errors.append("Innovation schedule does not sum correctly.")
-    if round1(sum(schedule["total_y_m"])) != round1(fs["investment_m"]):
-        errors.append("Total yearly schedule does not equal total investment.")
-
-    if round1(sum(partner["partner_y_m"])) != round1(partner["partner_total_m"]):
-        errors.append("Partner yearly split does not sum correctly.")
-    if round1(sum(partner["client_y_m"])) != round1(partner["client_total_m"]):
-        errors.append("Client yearly split does not sum correctly.")
-
+    errors = validate_financial_math(fs)
     return {"error": " | ".join(errors)} if errors else {"error": ""}
 
 
@@ -1174,38 +1383,23 @@ def build_technology_stack_distribution_table(fs: Dict[str, Any]) -> str:
     total_apps = fs["base_data"]["app_count"]
     sector = fs["base_data"]["sector"]
 
-    if sector == "Healthcare":
-        cats = [
-            ("Legacy Clinical / Commercial Platforms", 0.28, "15-22", "Critical Shortage", "High"),
-            ("Mid-Life ERP / Supply / Trial Platforms", 0.26, "10-15", "Declining", "Medium-High"),
-            ("Modern Data / AI / Patient Platforms", 0.18, "3-8", "High Demand", "Low"),
-            ("Regulatory / Quality / Manufacturing Systems", 0.18, "8-12", "Available", "Medium"),
-            ("SaaS / Enterprise Support Systems", 0.10, "3-5", "Vendor Managed", "Low-Medium"),
-        ]
-    elif sector == "Financial Services":
-        cats = [
-            ("Legacy Core Banking / Ledger Platforms", 0.30, "15-25", "Critical Shortage", "High"),
-            ("Mid-Life CRM / Ops / Reporting Systems", 0.24, "10-15", "Declining", "Medium-High"),
-            ("Modern Cloud / API / Digital Platforms", 0.18, "3-8", "High Demand", "Low"),
-            ("Risk / Compliance / Treasury Systems", 0.18, "8-12", "Available", "Medium"),
-            ("SaaS / Enterprise Support Systems", 0.10, "3-5", "Vendor Managed", "Low-Medium"),
-        ]
+    cats = [
+        ("Legacy Core Platforms", 0.28, "15-25", "Critical Shortage", "High"),
+        ("Mid-Life Operational Platforms", 0.28, "10-15", "Declining", "Medium-High"),
+        ("Modern Cloud / Digital Platforms", 0.18, "3-8", "High Demand", "Low"),
+        ("Industry-Specific Systems", 0.16, "8-12", "Available", "Medium"),
+        ("SaaS / Enterprise Support Systems", 0.10, "3-5", "Vendor Managed", "Low-Medium"),
+    ]
+
+    if sector == "Financial Services":
+        cats[0] = ("Legacy Core Banking / Ledger Platforms", 0.30, "15-25", "Critical Shortage", "High")
+        cats[3] = ("Risk / Compliance / Treasury Systems", 0.18, "8-12", "Available", "Medium")
+    elif sector == "Healthcare":
+        cats[0] = ("Legacy Clinical / Commercial Platforms", 0.28, "15-22", "Critical Shortage", "High")
+        cats[3] = ("Regulatory / Quality / Manufacturing Systems", 0.18, "8-12", "Available", "Medium")
     elif sector == "Manufacturing":
-        cats = [
-            ("Legacy Manufacturing / Dealer Platforms", 0.28, "15-25", "Critical Shortage", "High"),
-            ("Mid-Life ERP / MES / Supply Systems", 0.30, "10-15", "Declining", "Medium-High"),
-            ("Modern Cloud / IoT / Connected Platforms", 0.14, "3-8", "High Demand", "Low"),
-            ("Engineering / Product / Quality Systems", 0.18, "8-12", "Available", "Medium"),
-            ("SaaS / Enterprise Support Systems", 0.10, "3-5", "Vendor Managed", "Low-Medium"),
-        ]
-    else:
-        cats = [
-            ("Legacy Core Platforms", 0.28, "15-25", "Critical Shortage", "High"),
-            ("Mid-Life Operational Platforms", 0.28, "10-15", "Declining", "Medium-High"),
-            ("Modern Cloud / Digital Platforms", 0.18, "3-8", "High Demand", "Low"),
-            ("Industry-Specific Systems", 0.16, "8-12", "Available", "Medium"),
-            ("SaaS / Enterprise Support Systems", 0.10, "3-5", "Vendor Managed", "Low-Medium"),
-        ]
+        cats[0] = ("Legacy Manufacturing / Dealer Platforms", 0.28, "15-25", "Critical Shortage", "High")
+        cats[3] = ("Engineering / Product / Quality Systems", 0.18, "8-12", "Available", "Medium")
 
     counts = [int(round(total_apps * c[1])) for c in cats]
     counts[-1] += total_apps - sum(counts)
@@ -1299,55 +1493,45 @@ def build_business_value_creation_table(fs: Dict[str, Any]) -> str:
     if len(unit_names) < 2:
         unit_names = unit_names + ["Business Unit 2"]
 
-    rev_map: Dict[str, float] = {u: 0.0 for u in unit_names}
-    cost_map: Dict[str, float] = {u: 0.0 for u in unit_names}
-    risk_map: Dict[str, float] = {u: 0.0 for u in unit_names}
-    retain_map: Dict[str, float] = {u: 0.0 for u in unit_names}
-
-    for vd in fs["value_drivers"]:
-        unit = vd["business_unit"] if vd["business_unit"] in rev_map else unit_names[0]
-        name = vd["driver_name"].lower()
-        annual = vd["annual_impact_m"] * 3.15
-        if any(k in name for k in ["retention", "churn", "renewal", "retained"]):
-            retain_map[unit] += annual
-        elif any(k in name for k in ["risk", "delinquency", "compliance", "fraud"]):
-            risk_map[unit] += annual
-        elif any(k in name for k in ["cost", "efficiency", "savings", "productivity", "cycle"]):
-            cost_map[unit] += annual
-        else:
-            rev_map[unit] += annual
-
-    header = f"| Value Driver | {unit_names[0]} | {unit_names[1]} | Total |"
-    sep = "|---|---:|---:|---:|"
-
-    def total_of(mp: Dict[str, float]) -> float:
-        return sum(mp.values())
-
-    def row(label: str, mp: Dict[str, float]) -> str:
-        return (
-            f"| {label} | {mfmt_or_na(mp.get(unit_names[0], 0.0))} | "
-            f"{mfmt_or_na(mp.get(unit_names[1], 0.0))} | "
-            f"{mfmt_or_na(total_of(mp))} |"
-        )
-
-    rows = []
-    if total_of(rev_map) > 0:
-        rows.append(row("Revenue Growth", rev_map))
-    if total_of(cost_map) > 0:
-        rows.append(row("Cost Reduction", cost_map))
-    if total_of(risk_map) > 0:
-        rows.append(row("Risk Mitigation", risk_map))
-    if total_of(retain_map) > 0:
-        rows.append(row("Asset Retention", retain_map))
-
-    total_map = {
-        unit_names[0]: rev_map.get(unit_names[0], 0.0) + cost_map.get(unit_names[0], 0.0) + risk_map.get(unit_names[0], 0.0) + retain_map.get(unit_names[0], 0.0),
-        unit_names[1]: rev_map.get(unit_names[1], 0.0) + cost_map.get(unit_names[1], 0.0) + risk_map.get(unit_names[1], 0.0) + retain_map.get(unit_names[1], 0.0),
+    maps = {
+        "Revenue Growth": {u: 0.0 for u in unit_names},
+        "Cost Reduction": {u: 0.0 for u in unit_names},
+        "Risk Mitigation": {u: 0.0 for u in unit_names},
+        "Asset Retention": {u: 0.0 for u in unit_names},
     }
 
-    rows.append(row("TOTAL VALUE", total_map))
+    for vd in fs["value_drivers"]:
+        unit = vd["business_unit"] if vd["business_unit"] in unit_names else unit_names[0]
+        name = vd["driver_name"].lower()
+        annual = vd["annual_impact_m"] * 3.15
 
-    return "\n".join([header, sep] + rows)
+        if any(k in name for k in ["retention", "churn", "renewal", "retained"]):
+            maps["Asset Retention"][unit] += annual
+        elif any(k in name for k in ["risk", "delinquency", "compliance", "fraud"]):
+            maps["Risk Mitigation"][unit] += annual
+        elif any(k in name for k in ["cost", "efficiency", "savings", "productivity", "cycle", "reduction"]):
+            maps["Cost Reduction"][unit] += annual
+        else:
+            maps["Revenue Growth"][unit] += annual
+
+    header_units = unit_names[:3]
+    header = "| Value Driver | " + " | ".join(header_units) + " | Total |"
+    sep = "|---|" + "|".join(["---:" for _ in header_units]) + "|---:|"
+
+    rows = [header, sep]
+
+    for label, mp in maps.items():
+        total = sum(mp.values())
+        if total <= 0:
+            continue
+        values = [mfmt_or_na(mp.get(u, 0.0)) for u in header_units]
+        rows.append(f"| {label} | " + " | ".join(values) + f" | {mfmt_or_na(total)} |")
+
+    total_values = []
+    for u in header_units:
+        total_values.append(sum(maps[label].get(u, 0.0) for label in maps))
+    rows.append(f"| TOTAL VALUE | " + " | ".join(mfmt_or_na(v) for v in total_values) + f" | {mfmt_or_na(sum(total_values))} |")
+    return "\n".join(rows)
 
 
 def build_all_financial_tables_text(fs: Dict[str, Any]) -> str:
@@ -1371,7 +1555,7 @@ def render_financial_summary_text(company_name: str, fs: Dict[str, Any]) -> str:
         "",
         build_all_financial_tables_text(fs),
         "",
-        "Financial summary complete. All checks passed.",
+        "Financial summary complete. All deterministic checks passed.",
     ]
     return "\n".join(text)
 
@@ -1510,29 +1694,22 @@ def generate_adm_next_batch(
 # SESSION STATE
 # ============================================================
 
-if "leadership_json" not in st.session_state:
-    st.session_state.leadership_json = ""
+defaults = {
+    "leadership_json": "",
+    "bi_text": "",
+    "storylines": {},
+    "financial_summary": None,
+    "financial_summary_text": "",
+    "financial_tables_text": "",
+    "adm_text": "",
+    "adm_batch": 0,
+    "validation_report": {},
+    "validation_report_text": "",
+}
 
-if "bi_text" not in st.session_state:
-    st.session_state.bi_text = ""
-
-if "storylines" not in st.session_state:
-    st.session_state.storylines = {}
-
-if "financial_summary" not in st.session_state:
-    st.session_state.financial_summary = None
-
-if "financial_summary_text" not in st.session_state:
-    st.session_state.financial_summary_text = ""
-
-if "financial_tables_text" not in st.session_state:
-    st.session_state.financial_tables_text = ""
-
-if "adm_text" not in st.session_state:
-    st.session_state.adm_text = ""
-
-if "adm_batch" not in st.session_state:
-    st.session_state.adm_batch = 0
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
 # ============================================================
@@ -1595,6 +1772,16 @@ def validate_financial_summary() -> bool:
     return True
 
 
+def refresh_validation_report() -> None:
+    report = build_validation_report(
+        bi_text=st.session_state.bi_text,
+        adm_text=st.session_state.adm_text,
+        fs=st.session_state.financial_summary,
+    )
+    st.session_state.validation_report = report
+    st.session_state.validation_report_text = render_validation_report_text(report)
+
+
 # ============================================================
 # UI
 # ============================================================
@@ -1622,22 +1809,25 @@ if StateGraph is None:
 else:
     st.success("LangGraph available. ADM financial agent ready.")
 
-col_a, col_b, col_c, col_d, col_e = st.columns(5)
+col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
 
 with col_a:
-    bi_btn = st.button("Generate Business Intelligence", use_container_width=True)
+    bi_btn = st.button("Generate BI", use_container_width=True)
 
 with col_b:
-    storyline_btn = st.button("Generate Executive Storylines", use_container_width=True)
+    storyline_btn = st.button("Generate Storylines", use_container_width=True)
 
 with col_c:
-    financial_btn = st.button("Generate ADM Financial Summary", use_container_width=True)
+    financial_btn = st.button("Generate Financial Summary", use_container_width=True)
 
 with col_d:
     adm_batch1_btn = st.button("Generate ADM Batch 1", use_container_width=True)
 
 with col_e:
     adm_continue_btn = st.button("Continue ADM", use_container_width=True)
+
+with col_f:
+    validate_btn = st.button("Validate", use_container_width=True)
 
 
 # ============================================================
@@ -1650,6 +1840,7 @@ if bi_btn:
             client = GeminiClient(api_key=api_key, model=model_name)
             with st.spinner("Generating Business Intelligence..."):
                 st.session_state.bi_text = generate_bi(client, company_name)
+            refresh_validation_report()
             st.success("Business Intelligence generated.")
         except Exception as e:
             st.error(f"BI generation failed: {e}")
@@ -1687,7 +1878,7 @@ if financial_btn:
     if validate_base() and validate_bi():
         try:
             client = GeminiClient(api_key=api_key, model=model_name)
-            with st.spinner("Running LangGraph ADM financial agent..."):
+            with st.spinner("Running LangGraph ADM financial agent and deterministic validator..."):
                 financial_summary = run_financial_graph(
                     client=client,
                     company_name=company_name,
@@ -1696,7 +1887,8 @@ if financial_btn:
                 st.session_state.financial_summary = financial_summary
                 st.session_state.financial_tables_text = build_all_financial_tables_text(financial_summary)
                 st.session_state.financial_summary_text = render_financial_summary_text(company_name, financial_summary)
-            st.success("ADM Financial Summary generated and locked as source of truth.")
+            refresh_validation_report()
+            st.success("ADM Financial Summary generated and validated.")
         except Exception as e:
             st.error(f"Financial summary generation failed: {e}")
 
@@ -1716,7 +1908,7 @@ if adm_batch1_btn:
                     st.session_state.financial_summary_text = render_financial_summary_text(company_name, financial_summary)
 
             client = GeminiClient(api_key=api_key, model=model_name)
-            with st.spinner("Generating ADM Batch 1 using existing BI and locked financial summary..."):
+            with st.spinner("Generating ADM Batch 1 using locked numbers..."):
                 batch1_text = generate_adm_batch1(
                     client=client,
                     company_name=company_name,
@@ -1726,6 +1918,7 @@ if adm_batch1_btn:
                 )
                 st.session_state.adm_text = st.session_state.financial_summary_text + "\n\n" + batch1_text
                 st.session_state.adm_batch = 1
+            refresh_validation_report()
             st.success("ADM Financial Summary + Batch 1 generated.")
         except Exception as e:
             st.error(f"ADM batch 1 generation failed: {e}")
@@ -1740,7 +1933,7 @@ if adm_continue_btn:
             try:
                 client = GeminiClient(api_key=api_key, model=model_name)
                 next_batch = st.session_state.adm_batch + 1
-                with st.spinner(f"Generating ADM Batch {next_batch} using existing BI and locked numbers..."):
+                with st.spinner(f"Generating ADM Batch {next_batch} using locked numbers..."):
                     new_batch_text = generate_adm_next_batch(
                         client=client,
                         company_name=company_name,
@@ -1752,9 +1945,17 @@ if adm_continue_btn:
                     )
                     st.session_state.adm_text += "\n\n" + new_batch_text
                     st.session_state.adm_batch = next_batch
+                refresh_validation_report()
                 st.success(f"ADM Batch {next_batch} generated.")
             except Exception as e:
                 st.error(f"ADM continuation failed: {e}")
+
+if validate_btn:
+    refresh_validation_report()
+    if st.session_state.validation_report.get("status") == "PASSED":
+        st.success("Validation passed.")
+    else:
+        st.error("Validation failed. Check the Validation Report tab.")
 
 
 # ============================================================
@@ -1764,8 +1965,8 @@ if adm_continue_btn:
 st.divider()
 st.header("Outputs")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Business Intelligence", "Executive Storylines", "ADM Financial Summary", "ADM"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Business Intelligence", "Executive Storylines", "ADM Financial Summary", "ADM", "Validation Report"]
 )
 
 with tab1:
@@ -1867,5 +2068,26 @@ with tab4:
             data=save_docx_bytes(f"{company_name} ADM", st.session_state.adm_text),
             file_name=f"{sanitize_filename(company_name)}_ADM.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+
+with tab5:
+    if not st.session_state.validation_report_text:
+        refresh_validation_report()
+
+    status = st.session_state.validation_report.get("status", "FAILED")
+    if status == "PASSED":
+        st.success("Validation Status: PASSED")
+    else:
+        st.error("Validation Status: FAILED")
+
+    st.text_area("Validation Report", value=st.session_state.validation_report_text, height=500)
+
+    if st.session_state.validation_report_text:
+        st.download_button(
+            "Download Validation Report TXT",
+            data=st.session_state.validation_report_text,
+            file_name=f"{sanitize_filename(company_name)}_Validation_Report.txt",
+            mime="text/plain",
             use_container_width=True,
         )
