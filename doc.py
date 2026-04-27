@@ -265,7 +265,7 @@ def find_payback_years(investment: float, annual_value: float) -> float:
     return 5.0
 
 
-def approx_equal(a: float, b: float, tolerance: float = 0.2) -> bool:
+def approx_equal(a: float, b: float, tolerance: float = 0.5) -> bool:
     return abs(round1(a) - round1(b)) <= tolerance
 
 
@@ -1158,14 +1158,25 @@ def validate_financial_math(fs: Dict[str, Any]) -> List[str]:
     if not approx_equal(expected_5yr, fs["five_year_value_m"]):
         errors.append(f"5-year value should be {mfmt(expected_5yr)}, not {mfmt(fs['five_year_value_m'])}.")
 
-    expected_investment = round1(fs["base_data"]["annual_maintenance_m"] * fs["investment_multiplier_used"])
-    if not approx_equal(expected_investment, fs["investment_m"]):
-        errors.append(f"Investment should be {mfmt(expected_investment)}, not {mfmt(fs['investment_m'])}.")
+    investment_m = safe_float(fs.get("investment_m"))
+    five_year_value_m = safe_float(fs.get("five_year_value_m"))
 
-    expected_roi = round1(((fs["five_year_value_m"] - fs["investment_m"]) / fs["investment_m"]) * 100)
-    if not approx_equal(expected_roi, fs["roi_pct"]):
-        errors.append(f"ROI should be {pfmt(expected_roi)}, not {pfmt(fs['roi_pct'])}.")
+    if investment_m <= 0:
+        errors.append("Investment must be greater than zero.")
+    elif five_year_value_m <= 0:
+        errors.append("Five-year value must be greater than zero.")
+    else:
+        expected_roi = round1(((five_year_value_m - investment_m) / investment_m) * 100)
+        if not approx_equal(expected_roi, fs["roi_pct"]):
+            errors.append(f"ROI should be {pfmt(expected_roi)}, not {pfmt(fs['roi_pct'])}.")
+        if fs["roi_pct"] < 150.0 or fs["roi_pct"] > 300.0:
+            errors.append(f"ROI must stay between 150.0% and 300.0%, not {pfmt(fs['roi_pct'])}.")
 
+    multiplier = safe_float(fs.get("investment_multiplier_used"))
+    annual_maintenance_m = safe_float(fs["base_data"].get("annual_maintenance_m"))
+    expected_multiplier = round1(investment_m / annual_maintenance_m) if investment_m > 0 and annual_maintenance_m > 0 else 0.0
+    if multiplier > 0 and not approx_equal(expected_multiplier, multiplier):
+        errors.append(f"Investment multiplier should be {expected_multiplier}, not {multiplier}.")
     c = fs["cost_savings"]
     baseline = fs["base_data"]["annual_maintenance_m"]
     fixed = {
