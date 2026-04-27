@@ -631,7 +631,143 @@ ADM TEXT TO CORRECT:
 
 Return only the corrected ADM text.
 """
+ADM_BATCH1_PROMPT = """
+You are writing BATCH 1 of an ADM proposal.
 
+IMPORTANT SOURCE RULES
+- The Business Intelligence document below has already been generated.
+- Do not regenerate the BI.
+- Do not mention or copy any example company.
+- Use BI only as source context.
+- The Financial Summary JSON below is the only source of truth for all numbers.
+- Do not recalculate, invent, or alter any number.
+- Insert the financial tables exactly where relevant.
+- If a section does not have support from BI or Financial Summary, omit unsupported zero-value rows.
+
+CLIENT NAME:
+{company_name}
+
+BUSINESS INTELLIGENCE DOCUMENT:
+{business_intelligence}
+
+FINANCIAL SUMMARY JSON:
+{financial_summary_json}
+
+VERBATIM FINANCIAL TABLES:
+{financial_tables_text}
+
+Write BATCH 1 ONLY.
+
+START EXACTLY WITH:
+BATCH 1: Writing Executive Summary and Part 1. All numbers from Financial Summary.
+
+THEN WRITE EXACTLY THIS STRUCTURE:
+
+COMPREHENSIVE APPLICATION PORTFOLIO ANALYSIS & 5-YEAR TRANSFORMATION PARTNERSHIP
+A Joint Proposal from Deloitte & Tholons to {company_name}
+
+EXECUTIVE SUMMARY: THE STRATEGIC IMPERATIVE
+
+The Executive Summary must be 3 to 5 paragraphs and must include:
+- Why the client is at an application modernization inflection point
+- Total application count
+- Annual maintenance cost
+- Technical debt / modernization backlog
+- 5-year investment
+- ROI
+- Cumulative savings
+- Annual business value
+- Competitive urgency against named market leaders
+
+Then include this exact bullet structure:
+Deloitte and Tholons propose a 5-year, [investment] "[partnership name]" partnership that will:
+· Reduce legacy maintenance costs by [percentage/savings] through industrialized offshore delivery and modernization.
+· Accelerate digital transformation through API layers, cloud modernization, and AI-enabled delivery.
+· Generate [annual value] in annual business value at steady state.
+· Transform ADM from a maintenance-heavy cost center into a strategic modernization and innovation engine.
+
+PART 1: DETAILED APPLICATION PORTFOLIO ANALYSIS
+
+1.1 Application Portfolio Composition & Characteristics
+Include exactly these three bullets:
+· Total Application Count: [number]
+· Annual Maintenance Cost: [amount]
+· Technical Debt Quantification: [amount] in modernization backlog
+
+Portfolio Distribution by Business Unit:
+Use the BUSINESS UNIT ALLOCATION TABLE from the verbatim financial tables.
+
+Technology Stack Distribution:
+Use the TECHNOLOGY STACK DISTRIBUTION TABLE from the verbatim financial tables.
+
+For each business unit from the Financial Summary, write one numbered section:
+1.2 [Business Unit Name] Deep Dive
+1.3 [Business Unit Name] Deep Dive
+1.4 [Business Unit Name] Deep Dive, if applicable
+1.5 [Business Unit Name] Deep Dive, if applicable
+1.6 [Business Unit Name] Deep Dive, if applicable
+
+EACH BUSINESS UNIT DEEP DIVE MUST FOLLOW THIS EXACT STRUCTURE:
+
+[Business Unit Name] Deep Dive
+
+Core Application Systems:
+
+1. [Named System 1]
+· Purpose: [one sentence]
+· Technology Stack:
+· Frontend: [specific technology or plausible stack]
+· Middleware: [specific technology or plausible stack]
+· Backend: [specific technology or plausible stack]
+· Integration: [specific integration pattern]
+· Current State Issues:
+· [Issue 1 tied to BI]
+· [Issue 2 tied to BI]
+· [Issue 3 tied to BI]
+· Maintenance Cost: [amount from allocation or logical share]
+· Market Comparison: [named competitor and relevant benchmark]
+
+2. [Named System 2]
+Use the same exact structure.
+
+3. [Named System 3]
+Use the same exact structure.
+
+4. [Named System 4]
+Use the same exact structure.
+
+If the business unit requires more depth, include:
+5. [Named System 5]
+Use the same exact structure.
+
+6. [Named System 6]
+Use the same exact structure.
+
+Quantifiable Impact — [Business Unit Name]:
+Use a table with exactly these columns:
+| Business Driver | Per-Unit Metric | Annual Enterprise Impact |
+|---|---|---:|
+
+Rules for the Quantifiable Impact table:
+- Use value drivers from the Financial Summary.
+- Do not invent zero values.
+- Do not use $0.0M.
+- If only one value driver exists for a business unit, include one row only.
+- If multiple value drivers exist, include multiple rows.
+- Annual Enterprise Impact must match Financial Summary values.
+
+STRICT FORMAT RULES FOR PART 1:
+- Do not use generic headings like "Application Analysis" unless the reference structure requires it.
+- Do not summarize business units in paragraphs only.
+- Every business unit must have named systems.
+- Every named system must include Purpose, Technology Stack, Current State Issues, Maintenance Cost, and Market Comparison.
+- Keep the table structures consistent with the reference ADM documents.
+- Do not generate Part 2.
+- Do not generate Part 3.
+- Do not generate Part 4.
+- Do not generate Appendices.
+- End exactly with: BATCH 1 complete. Say 'continue' for the next batch.
+"""
 ADM_CONTINUE_PROMPT = """
 You are continuing an ADM proposal.
 
