@@ -746,14 +746,37 @@ PART 4: CONCLUSION & STRATEGIC IMPERATIVES
 4.3 Critical Success Factors
 4.4 Recommended Next Steps
 4.5 Final Investment Summary
+
 APPENDICES
-FOOTER
+
+Prepared for:
+{company_name} Executive Leadership Team
+
+Prepared by:
+Deloitte Consulting LLP & Tholons Inc.
+
+Date: March 2026
+
+Tholons Contacts:
+Abhay Anant Vashistha; abhay@tholons.com
+Frank Pendle; frank@tholons.com
+Avinash Vashistha; avi@tholons.com
+
+- The footer section starting with "Prepared for:" is mandatory.
+- Do not omit it under any circumstance.
 
 START with:
 BATCH {next_batch_number}: Writing requested sections. All numbers from Financial Summary.
 
-END with:
-BATCH {next_batch_number} complete. Say 'continue' for the next batch.
+END CONDITION:
+
+- If this is Batch 6:
+  End with:
+  "BATCH 6 complete. ADM document fully generated."
+
+- If this is NOT Batch 6:
+  End with:
+  "BATCH {next_batch_number} complete. Say 'continue' for the next batch."
 """
 
 
