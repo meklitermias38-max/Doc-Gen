@@ -731,14 +731,14 @@ FORMAT TO FOLLOW EXACTLY:
 
 2.X [Business Unit Name]: [Competitor 1] & [Competitor 2] Benchmark
 
-| Capability | {company_name} Current State | Market Leader Advantage | Technology Gap |
-|------------|-----------------------------|------------------------|----------------|
+| Capability | Client Current State | Market Leader Advantage | Technology Gap |
+|------------|---------------------|------------------------|----------------|
 | Capability 1 | | | |
 | Capability 2 | | | |
 | Capability 3 | | | |
 | Capability 4 | | | |
 
-Quantified Impact: $XXX.XM in annual value at risk if {company_name} fails to close the [specific gap].
+Quantified Impact: $XXX.XM in annual value at risk if the client fails to close the [specific gap].
 
 IMPORTANT:
 - Capability names must be strategic (e.g., Predictive Routing, Data Democratization, AI-led R&D)
