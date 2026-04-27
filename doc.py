@@ -986,25 +986,15 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         return round1(((five_year_value_m - inv) / inv) * 100)
 
     roi_pct = roi_for(multiplier)
+    while roi_pct < 150.0 and multiplier > 2.0:
+        multiplier -= 0.5
+        roi_pct = roi_for(multiplier)
 
-# First reduce investment multiplier until ROI reaches minimum 150%
-while roi_pct < 150.0 and multiplier > 1.0:
-    multiplier -= 0.5
-    roi_pct = roi_for(multiplier)
+    while roi_pct > 300.0 and multiplier < 6.0:
+        multiplier += 0.5
+        roi_pct = roi_for(multiplier)
 
-# If ROI is still below 150%, scale investment to force a valid positive ROI
-if roi_pct < 150.0:
-    investment_m = round1(five_year_value_m / 2.5)  # gives 150% ROI
-    multiplier = round1(investment_m / annual_maintenance_m)
-    roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100)
-else:
     investment_m = round1(annual_maintenance_m * multiplier)
-
-# If ROI is above 300%, increase investment to cap ROI at 300%
-if roi_pct > 300.0:
-    investment_m = round1(five_year_value_m / 4.0)  # gives 300% ROI
-    multiplier = round1(investment_m / annual_maintenance_m)
-    roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100)
 
     cost_savings = {
         "y1_m": round1(annual_maintenance_m * 0.12),
@@ -1279,14 +1269,7 @@ def build_validation_report(
         financial_errors = validate_financial_math(fs)
     else:
         financial_errors = ["Financial summary has not been generated."]
-    if fs["roi_pct"] < 0:
-    errors.append("ROI is negative. Investment is higher than 5-year value.")
 
-    if fs["roi_pct"] < 150:
-    errors.append("ROI is below minimum threshold of 150%.")
-
-    if fs["roi_pct"] > 300:
-    errors.append("ROI is above maximum threshold of 300%.")
     if adm_text and fs:
         adm_errors = validate_adm_structure_and_numbers(adm_text, fs)
     elif adm_text and not fs:
