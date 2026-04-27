@@ -716,9 +716,37 @@ ALREADY GENERATED ADM CONTENT:
 Continue with BATCH {next_batch_number} only.
 
 BATCH 2
+PART_2_PROMPT = """
 PART 2: COMPETITIVE BENCHMARKING AGAINST MARKET LEADERS
-Create one separate benchmarking section per business unit.
-Each section must have a comparison table and quantified impact sentence.
+
+STRICT STRUCTURE RULES (DO NOT DEVIATE):
+- Each business unit must have EXACTLY one section
+- Each section must contain EXACTLY one table
+- Each table must have EXACTLY 4 rows (capabilities)
+- NO bullet points anywhere in Part 2
+- NO paragraphs inside the table
+- ONLY one sentence after the table called "Quantified Impact"
+
+FORMAT TO FOLLOW EXACTLY:
+
+2.X [Business Unit Name]: [Competitor 1] & [Competitor 2] Benchmark
+
+| Capability | {company_name} Current State | Market Leader Advantage | Technology Gap |
+|------------|-----------------------------|------------------------|----------------|
+| Capability 1 | | | |
+| Capability 2 | | | |
+| Capability 3 | | | |
+| Capability 4 | | | |
+
+Quantified Impact: $XXX.XM in annual value at risk if {company_name} fails to close the [specific gap].
+
+IMPORTANT:
+- Capability names must be strategic (e.g., Predictive Routing, Data Democratization, AI-led R&D)
+- Market leaders must be REAL companies relevant to the business unit
+- Technology Gap must be sharp, not generic
+- Keep tone consulting-grade, no fluff
+- Follow EXACT formatting from reference documents
+"""
 
 BATCH 3
 PART 3: 5-YEAR TRANSFORMATION PARTNERSHIP DEAL STRUCTURE
