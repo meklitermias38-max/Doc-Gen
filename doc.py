@@ -276,6 +276,66 @@ def parse_money_values_m(text: str) -> List[float]:
     return values
 
 
+def pydantic_to_dict(model: Any) -> Dict[str, Any]:
+    """Works with both Pydantic v1 and v2."""
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    if hasattr(model, "dict"):
+        return model.dict()
+    return dict(model)
+
+
+def solve_investment_for_roi(
+    five_year_value_m: float,
+    annual_maintenance_m: float,
+    target_roi: float = 180.0,
+    min_roi: float = 150.0,
+    max_roi: float = 300.0,
+) -> tuple[float, float, float]:
+    """
+    Produces a positive ROI inside the required band.
+
+    ROI = ((five_year_value - investment) / investment) * 100
+    Therefore, investment = five_year_value / (1 + target_roi / 100)
+
+    Returns: investment_m, roi_pct, investment_multiplier
+    """
+    five_year_value_m = round1(five_year_value_m)
+    annual_maintenance_m = round1(annual_maintenance_m)
+
+    if five_year_value_m <= 0:
+        raise ValueError("Five-year value must be positive to calculate ROI.")
+    if annual_maintenance_m <= 0:
+        raise ValueError("Annual maintenance must be positive to calculate ROI.")
+
+    # Start with the target ROI investment level.
+    investment_m = five_year_value_m / (1 + target_roi / 100.0)
+
+    # Keep the investment commercially reasonable against annual maintenance.
+    min_investment_m = annual_maintenance_m * 1.0
+    max_investment_m = annual_maintenance_m * 6.0
+    investment_m = max(min_investment_m, min(investment_m, max_investment_m))
+    investment_m = round1(investment_m)
+
+    roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100.0)
+
+    # If commercial bounds still produce ROI outside range, prioritize the required ROI band.
+    if roi_pct < min_roi:
+        investment_m = round1(five_year_value_m / (1 + min_roi / 100.0))
+        roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100.0)
+
+    if roi_pct > max_roi:
+        investment_m = round1(five_year_value_m / (1 + max_roi / 100.0))
+        roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100.0)
+
+    multiplier = round1(investment_m / annual_maintenance_m)
+
+    if roi_pct < min_roi or roi_pct > max_roi:
+        raise ValueError(f"ROI solver failed to keep ROI between {min_roi}% and {max_roi}%. Got {roi_pct}%.")
+
+    return investment_m, roi_pct, multiplier
+
+
 # ============================================================
 # GEMINI CLIENT
 # ============================================================
@@ -803,7 +863,7 @@ STRICT RETRY INSTRUCTION:
     except Exception as e:
         return {"error": str(e)}
 
-    return {"extracted_inputs": parsed.model_dump()}
+    return {"extracted_inputs": pydantic_to_dict(parsed)}
 
 
 def build_business_unit_allocations(
@@ -891,7 +951,12 @@ def build_blended_rates(sector: str) -> List[Dict[str, Any]]:
 
 
 def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
-    extracted = state["extracted_inputs"]
+    if state.get("error"):
+        return state
+
+    extracted = state.get("extracted_inputs")
+    if not extracted:
+        return {"error": "Financial extraction did not produce usable inputs."}
 
     facts = extracted.get("company_facts", {})
     business_units = extracted.get("business_units", [])
@@ -976,25 +1041,13 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     total_annual_value_m = round1(sum(v["annual_impact_m"] for v in value_drivers))
     five_year_value_m = round1(total_annual_value_m * 3.15)
 
-    base_multiplier_map = {"light": 3.5, "medium": 4.0, "heavy": 4.5}
-    multiplier = base_multiplier_map[scope_preference]
-
-    def roi_for(mult: float) -> float:
-        inv = annual_maintenance_m * mult
-        if inv <= 0:
-            return 0.0
-        return round1(((five_year_value_m - inv) / inv) * 100)
-
-    roi_pct = roi_for(multiplier)
-    while roi_pct < 150.0 and multiplier > 2.0:
-        multiplier -= 0.5
-        roi_pct = roi_for(multiplier)
-
-    while roi_pct > 300.0 and multiplier < 6.0:
-        multiplier += 0.5
-        roi_pct = roi_for(multiplier)
-
-    investment_m = round1(annual_maintenance_m * multiplier)
+    investment_m, roi_pct, multiplier = solve_investment_for_roi(
+        five_year_value_m=five_year_value_m,
+        annual_maintenance_m=annual_maintenance_m,
+        target_roi=180.0,
+        min_roi=150.0,
+        max_roi=300.0,
+    )
 
     cost_savings = {
         "y1_m": round1(annual_maintenance_m * 0.12),
@@ -1197,7 +1250,7 @@ def validate_bi_structure(bi_text: str) -> List[str]:
     return errors
 
 
-def validate_adm_structure_and_numbers(adm_text: str, fs: Dict[str, Any]) -> List[str]:
+def validate_adm_structure_and_numbers(adm_text: str, fs: Dict[str, Any], adm_batch: int = 0) -> List[str]:
     errors = []
 
     if contains_bad_zero_values(adm_text):
@@ -1206,18 +1259,36 @@ def validate_adm_structure_and_numbers(adm_text: str, fs: Dict[str, Any]) -> Lis
     required_order = [
         "EXECUTIVE SUMMARY",
         "PART 1: DETAILED APPLICATION PORTFOLIO ANALYSIS",
-        "PART 2: COMPETITIVE BENCHMARKING",
-        "PART 3: 5-YEAR TRANSFORMATION PARTNERSHIP DEAL STRUCTURE",
-        "3.3 Detailed Financial Model",
-        "3.4 Offshore Delivery Model",
-        "3.5 Governance",
-        "3.6 Risk Mitigation",
-        "3.7 Transition",
-        "3.8 Success Metrics",
-        "PART 4: CONCLUSION",
-        "APPENDICES",
-        "Prepared for:",
     ]
+
+    # Validate only the sections that should exist for the current batch.
+    # Earlier version expected the full ADM even after Batch 1, so validation failed too early.
+    if adm_batch >= 2:
+        required_order.append("PART 2: COMPETITIVE BENCHMARKING")
+
+    if adm_batch >= 3:
+        required_order.append("PART 3: 5-YEAR TRANSFORMATION PARTNERSHIP DEAL STRUCTURE")
+
+    if adm_batch >= 4:
+        required_order.extend([
+            "3.3 Detailed Financial Model",
+            "3.4 Offshore Delivery Model",
+        ])
+
+    if adm_batch >= 5:
+        required_order.extend([
+            "3.5 Governance",
+            "3.6 Risk Mitigation",
+            "3.7 Transition",
+            "3.8 Success Metrics",
+        ])
+
+    if adm_batch >= 6:
+        required_order.extend([
+            "PART 4: CONCLUSION",
+            "APPENDICES",
+            "Prepared for:",
+        ])
 
     last_pos = -1
     for section in required_order:
@@ -1257,6 +1328,7 @@ def build_validation_report(
     bi_text: str,
     adm_text: str,
     fs: Optional[Dict[str, Any]],
+    adm_batch: int = 0,
 ) -> Dict[str, Any]:
     financial_errors = []
     adm_errors = []
@@ -1271,7 +1343,7 @@ def build_validation_report(
         financial_errors = ["Financial summary has not been generated."]
 
     if adm_text and fs:
-        adm_errors = validate_adm_structure_and_numbers(adm_text, fs)
+        adm_errors = validate_adm_structure_and_numbers(adm_text, fs, adm_batch=adm_batch)
     elif adm_text and not fs:
         adm_errors = ["ADM exists but financial summary is missing."]
     else:
@@ -1286,7 +1358,7 @@ def build_validation_report(
         bi_errors=bi_errors,
         warnings=warnings,
     )
-    return report.model_dump()
+    return pydantic_to_dict(report)
 
 
 def render_validation_report_text(report: Dict[str, Any]) -> str:
@@ -1311,8 +1383,19 @@ def render_validation_report_text(report: Dict[str, Any]) -> str:
 
 
 def financial_validate_node(state: AdmFinancialState) -> AdmFinancialState:
-    fs = state["financial_summary"]
+    if state.get("error"):
+        return state
+
+    fs = state.get("financial_summary")
+    if not fs:
+        return {"error": "Financial summary was not generated."}
+
     errors = validate_financial_math(fs)
+
+    roi_pct = safe_float(fs.get("roi_pct"))
+    if roi_pct < 150.0 or roi_pct > 300.0:
+        errors.append(f"ROI must be between 150.0% and 300.0%. Current ROI is {pfmt(roi_pct)}.")
+
     return {"error": " | ".join(errors)} if errors else {"error": ""}
 
 
@@ -1777,6 +1860,7 @@ def refresh_validation_report() -> None:
         bi_text=st.session_state.bi_text,
         adm_text=st.session_state.adm_text,
         fs=st.session_state.financial_summary,
+        adm_batch=st.session_state.get("adm_batch", 0),
     )
     st.session_state.validation_report = report
     st.session_state.validation_report_text = render_validation_report_text(report)
