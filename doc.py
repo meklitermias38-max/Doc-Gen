@@ -632,62 +632,6 @@ ADM TEXT TO CORRECT:
 Return only the corrected ADM text.
 """
 
-ADM_BATCH1_PROMPT = """
-You are writing an ADM proposal.
-
-IMPORTANT SOURCE RULES
-- The Business Intelligence document below has already been generated.
-- Do not regenerate the BI.
-- Do not mention or copy any example company.
-- Use BI only as source context.
-- The Financial Summary JSON below is the only source of truth for all numbers.
-- Do not recalculate, invent, or alter any number.
-- Insert the financial tables exactly where relevant.
-- If a section does not have support from BI or Financial Summary, omit unsupported zero-value rows.
-
-CLIENT NAME:
-{company_name}
-
-BUSINESS INTELLIGENCE DOCUMENT:
-{business_intelligence}
-
-FINANCIAL SUMMARY JSON:
-{financial_summary_json}
-
-VERBATIM FINANCIAL TABLES:
-{financial_tables_text}
-
-Write EXACTLY this structure:
-
-COMPREHENSIVE APPLICATION PORTFOLIO ANALYSIS & 5-YEAR TRANSFORMATION PARTNERSHIP
-A Joint Proposal from Deloitte & Tholons to {company_name}
-
-EXECUTIVE SUMMARY: THE STRATEGIC IMPERATIVE
-
-PART 1: DETAILED APPLICATION PORTFOLIO ANALYSIS
-1.1 Application Portfolio Composition & Characteristics
-1.2 [Business Unit 1] Deep Dive
-1.3 [Business Unit 2] Deep Dive
-1.4 [Business Unit 3] Deep Dive if applicable
-1.5 [Business Unit 4] Deep Dive if applicable
-1.6 [Business Unit 5] Deep Dive if applicable
-
-Rules:
-- Executive Summary must include strategic imperative, app count, maintenance, tech debt, investment, ROI, cumulative savings, and annual business value.
-- 1.1 must include Portfolio Distribution by Business Unit and Technology Stack Distribution.
-- Each business unit deep dive must include 3 to 6 systems.
-- Each system must include purpose, technology stack, current state issues, maintenance cost, and market comparison.
-- End every business unit with Quantifiable Impact table.
-- Do not add extra headings.
-- Do not add methodology notes.
-
-START with:
-BATCH 1: Writing Executive Summary and Part 1. All numbers from Financial Summary.
-
-END with:
-BATCH 1 complete. Say 'continue' for the next batch.
-"""
-
 ADM_CONTINUE_PROMPT = """
 You are continuing an ADM proposal.
 
@@ -716,37 +660,29 @@ ALREADY GENERATED ADM CONTENT:
 Continue with BATCH {next_batch_number} only.
 
 BATCH 2
-PART_2_PROMPT = """
 PART 2: COMPETITIVE BENCHMARKING AGAINST MARKET LEADERS
 
-STRICT STRUCTURE RULES (DO NOT DEVIATE):
-- Each business unit must have EXACTLY one section
-- Each section must contain EXACTLY one table
-- Each table must have EXACTLY 4 rows (capabilities)
-- NO bullet points anywhere in Part 2
-- NO paragraphs inside the table
-- ONLY one sentence after the table called "Quantified Impact"
+STRICT STRUCTURE RULES FOR PART 2:
+- Each business unit must have exactly one section.
+- Each section must contain exactly one benchmarking table.
+- Each table must have exactly 4 capability rows.
+- Do not use bullet points anywhere in Part 2.
+- Do not add paragraphs before the table.
+- After each table, add only one sentence beginning with "Quantified Impact:".
+- Number the sections as 2.1, 2.2, 2.3, 2.4, and 2.5 if required.
 
-FORMAT TO FOLLOW EXACTLY:
+For each business unit, use exactly this format:
 
 Section [number] [Business Unit Name]: [Competitor 1] and [Competitor 2] Benchmark
 
 | Capability | Client Current State | Market Leader Advantage | Technology Gap |
-|------------|---------------------|------------------------|----------------|
-| Capability 1 | | | |
-| Capability 2 | | | |
-| Capability 3 | | | |
-| Capability 4 | | | |
+|---|---|---|---|
+| [Strategic Capability 1] | [Client current-state issue] | [Named market leader advantage] | [Specific technology gap] |
+| [Strategic Capability 2] | [Client current-state issue] | [Named market leader advantage] | [Specific technology gap] |
+| [Strategic Capability 3] | [Client current-state issue] | [Named market leader advantage] | [Specific technology gap] |
+| [Strategic Capability 4] | [Client current-state issue] | [Named market leader advantage] | [Specific technology gap] |
 
 Quantified Impact: $XXX.XM in annual value at risk if the client fails to close the [specific gap].
-
-IMPORTANT:
-- Capability names must be strategic (e.g., Predictive Routing, Data Democratization, AI-led R&D)
-- Market leaders must be REAL companies relevant to the business unit
-- Technology Gap must be sharp, not generic
-- Keep tone consulting-grade, no fluff
-- Follow EXACT formatting from reference documents
-"""
 
 BATCH 3
 PART 3: 5-YEAR TRANSFORMATION PARTNERSHIP DEAL STRUCTURE
@@ -790,21 +726,12 @@ Abhay Anant Vashistha; abhay@tholons.com
 Frank Pendle; frank@tholons.com
 Avinash Vashistha; avi@tholons.com
 
-- The footer section starting with "Prepared for:" is mandatory.
-- Do not omit it under any circumstance.
-
 START with:
 BATCH {next_batch_number}: Writing requested sections. All numbers from Financial Summary.
 
 END CONDITION:
-
-- If this is Batch 6:
-  End with:
-  "BATCH 6 complete. ADM document fully generated."
-
-- If this is NOT Batch 6:
-  End with:
-  "BATCH {next_batch_number} complete. Say 'continue' for the next batch."
+- If this is Batch 6, end with: BATCH 6 complete. ADM document fully generated.
+- If this is not Batch 6, end with: BATCH {next_batch_number} complete. Say 'continue' for the next batch.
 """
 
 
