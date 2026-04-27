@@ -729,7 +729,7 @@ STRICT STRUCTURE RULES (DO NOT DEVIATE):
 
 FORMAT TO FOLLOW EXACTLY:
 
-2.X [Business Unit Name]: [Competitor 1] & [Competitor 2] Benchmark
+Section [number] [Business Unit Name]: [Competitor 1] and [Competitor 2] Benchmark
 
 | Capability | Client Current State | Market Leader Advantage | Technology Gap |
 |------------|---------------------|------------------------|----------------|
