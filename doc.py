@@ -1590,25 +1590,44 @@ def validate_bi_summary_roi_table(bi_text: str) -> List[str]:
 
 
 def validate_named_market_leaders(bi_text: str) -> List[str]:
+    """
+    Validates that each Market Leaders line lists exactly 4 real named companies.
+
+    Important: Do NOT scan the full line for the phrase "market leaders", because
+    every valid row starts with "Market Leaders:". Only validate the entries after
+    the colon. This avoids false failures for valid rows such as:
+    Market Leaders: Novo Nordisk, Sanofi, AstraZeneca, Boehringer Ingelheim
+    """
     errors = []
-    banned_patterns = [
-        r"\bmarket leader\s*[a-z0-9]\b",
-        r"\bcompetitor\s*[a-z0-9]\b",
-        r"\bcompany\s*[a-z0-9]\b",
-        r"\bpeer\s*[a-z0-9]\b",
-        r"leading global",
-        r"regional players",
-        r"regional banks",
-        r"top competitors",
-        r"market leaders",
-        r"industry leaders",
-        r"global peers",
-        r"regional peers",
-        r"leading banks",
-        r"leading companies",
-        r"large incumbents",
-        r"benchmark peers",
+
+    placeholder_patterns = [
+        r"^market leader\s*[a-z0-9]+$",
+        r"^competitor\s*[a-z0-9]+$",
+        r"^company\s*[a-z0-9]+$",
+        r"^peer\s*[a-z0-9]+$",
+        r"^player\s*[a-z0-9]+$",
+        r"^leader\s*[a-z0-9]+$",
+        r"^benchmark peer\s*[a-z0-9]*$",
     ]
+
+    generic_entries = {
+        "leading global players",
+        "leading global banks",
+        "leading banks",
+        "regional players",
+        "regional banks",
+        "top competitors",
+        "market leaders",
+        "industry leaders",
+        "global peers",
+        "regional peers",
+        "leading companies",
+        "large incumbents",
+        "benchmark peers",
+        "global competitors",
+        "regional competitors",
+        "top players",
+    }
 
     market_leader_lines = [
         line.strip()
@@ -1620,23 +1639,31 @@ def validate_named_market_leaders(bi_text: str) -> List[str]:
         return ["BI does not contain any Market Leaders lines."]
 
     for line in market_leader_lines:
-        lower = line.lower()
         names_part = line.split(":", 1)[-1].strip()
         names = [x.strip() for x in re.split(r",|;|\|", names_part) if x.strip()]
 
-        for pattern in banned_patterns:
-            if re.search(pattern, lower):
-                errors.append(f"Generic or placeholder market leader wording found: {line}")
-
         if len(names) != 4:
             errors.append(f"Market Leaders must list exactly 4 named companies: {line}")
+            continue
 
         for name in names:
-            if re.search(r"\b(leader|competitor|peer|player|company)\b", name.lower()):
+            cleaned = re.sub(r"\s+", " ", name.strip())
+            lowered = cleaned.lower()
+
+            if lowered in generic_entries:
                 errors.append(f"Market leader entry appears generic instead of named: {name}")
+                continue
+
+            for pattern in placeholder_patterns:
+                if re.search(pattern, lowered):
+                    errors.append(f"Market leader entry appears placeholder-based instead of named: {name}")
+                    break
+
+            # A real company name should usually contain letters and not be only a label/number.
+            if not re.search(r"[A-Za-z]", cleaned):
+                errors.append(f"Invalid market leader name found: {name}")
 
     return errors
-
 
 def validate_adm_structure_and_numbers(adm_text: str, fs: Dict[str, Any], adm_batch: int = 0) -> List[str]:
     errors = []
