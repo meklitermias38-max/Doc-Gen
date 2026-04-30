@@ -4,11 +4,20 @@ import io
 import json
 import re
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, TypedDict, Literal
 
 import streamlit as st
 from docx import Document
 from docx.shared import Pt
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+except ImportError:
+    SimpleDocTemplate = None
 
 try:
     from google import genai
@@ -51,12 +60,13 @@ class ExecProfile:
     title: str
     linkedin: str
     type: str
-    business_line: Optional[str] = None
+    business_lines: Optional[List[str]] = None
 
 
 class AdmFinancialState(TypedDict, total=False):
     company_name: str
     bi_text: str
+    consulting_partner: str
     extracted_inputs: Dict[str, Any]
     financial_summary: Dict[str, Any]
     error: str
@@ -84,10 +94,20 @@ class ValueDriverSchema(BaseModel):
     source_logic: str
 
 
+class InvestmentCaseSchema(BaseModel):
+    total_investment_m: float
+    investment_logic: str
+    legacy_pct: float = 59.5
+    modernization_pct: float = 15.5
+    digital_pods_pct: float = 19.0
+    innovation_pct: float = 6.0
+
+
 class FinancialExtractionSchema(BaseModel):
     company_facts: CompanyFactsSchema
     business_units: List[BusinessUnitSchema]
     value_drivers: List[ValueDriverSchema]
+    investment_case: InvestmentCaseSchema
     error: str = ""
 
 
@@ -114,13 +134,120 @@ def save_docx_bytes(title: str, body: str) -> bytes:
     style.font.size = Pt(10.5)
 
     doc.add_heading(title, level=0)
-    for line in body.split("\n"):
-        doc.add_paragraph(line)
+    lines = body.splitlines()
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        if line.startswith("|") and "|" in line:
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            clean_rows = []
+            for tl in table_lines:
+                cells = [c.strip() for c in tl.strip("|").split("|")]
+                if all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cells):
+                    continue
+                clean_rows.append(cells)
+
+            if clean_rows:
+                table = doc.add_table(rows=1, cols=len(clean_rows[0]))
+                table.style = "Table Grid"
+                hdr_cells = table.rows[0].cells
+                for idx, cell_text in enumerate(clean_rows[0]):
+                    hdr_cells[idx].text = cell_text
+                    for paragraph in hdr_cells[idx].paragraphs:
+                        for run in paragraph.runs:
+                            run.bold = True
+
+                for row in clean_rows[1:]:
+                    row_cells = table.add_row().cells
+                    for idx, cell_text in enumerate(row[:len(row_cells)]):
+                        row_cells[idx].text = cell_text
+            continue
+
+        if line.startswith("PART ") or line.startswith("BATCH ") or (line.isupper() and len(line) < 100):
+            doc.add_heading(line, level=1)
+        elif line.startswith("TABLE ") or re.match(r"^\d+(\.\d+)*\s+", line):
+            doc.add_heading(line, level=2)
+        elif line.startswith("· ") or line.startswith("- "):
+            doc.add_paragraph(line[2:].strip(), style="List Bullet")
+        else:
+            p = doc.add_paragraph()
+            run = p.add_run(line)
+            if line.endswith(":") and len(line) < 100:
+                run.bold = True
+        i += 1
 
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
+
+def save_pdf_bytes(title: str, body: str) -> bytes:
+    if SimpleDocTemplate is None:
+        raise ImportError("reportlab is not installed. Run: python -m pip install reportlab")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    story = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
+
+    lines = body.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            story.append(Spacer(1, 6))
+            i += 1
+            continue
+
+        if line.startswith("|") and "|" in line:
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            clean_rows = []
+            for tl in table_lines:
+                cells = [c.strip() for c in tl.strip("|").split("|")]
+                if all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cells):
+                    continue
+                clean_rows.append(cells)
+
+            if clean_rows:
+                table = Table(clean_rows, repeatRows=1)
+                table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]))
+                story.append(table)
+                story.append(Spacer(1, 10))
+            continue
+
+        safe_line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if line.startswith("PART ") or line.startswith("BATCH ") or (line.isupper() and len(line) < 100):
+            story.append(Paragraph(f"<b>{safe_line}</b>", styles["Heading1"]))
+        elif line.startswith("TABLE ") or re.match(r"^\d+(\.\d+)*\s+", line):
+            story.append(Paragraph(f"<b>{safe_line}</b>", styles["Heading2"]))
+        else:
+            story.append(Paragraph(safe_line, styles["BodyText"]))
+        i += 1
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.read()
+
 
 
 def clean_json_response(text: str) -> str:
@@ -153,7 +280,7 @@ def parse_exec_profiles_from_json(raw_json: str) -> List[ExecProfile]:
                 title=item.get("title", ""),
                 linkedin=item.get("linkedin", ""),
                 type=item.get("type", ""),
-                business_line=item.get("business_line"),
+                business_lines=item.get("business_lines") or ([item.get("business_line")] if item.get("business_line") else []),
             )
         )
 
@@ -184,7 +311,7 @@ def safe_int(value: Any, default: int = 0) -> int:
 
 
 def round1(x: float) -> float:
-    return round(float(x), 1)
+    return float(Decimal(str(x)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
 def mfmt(x: float) -> str:
@@ -202,7 +329,7 @@ def mfmt_or_na(x: Any) -> str:
         x = float(x)
         if abs(x) < 0.0001:
             return "N/A"
-        return f"${round(x, 1):,.1f}M"
+        return f"${round1(x):,.1f}M"
     except Exception:
         return "N/A"
 
@@ -214,7 +341,7 @@ def pfmt_or_na(x: Any) -> str:
         x = float(x)
         if abs(x) < 0.0001:
             return "N/A"
-        return f"{round(x, 1)}%"
+        return f"{round1(x)}%"
     except Exception:
         return "N/A"
 
@@ -265,7 +392,7 @@ def find_payback_years(investment: float, annual_value: float) -> float:
     return 5.0
 
 
-def approx_equal(a: float, b: float, tolerance: float = 0.5) -> bool:
+def approx_equal(a: float, b: float, tolerance: float = 0.05) -> bool:
     return abs(round1(a) - round1(b)) <= tolerance
 
 
@@ -285,55 +412,49 @@ def pydantic_to_dict(model: Any) -> Dict[str, Any]:
     return dict(model)
 
 
-def solve_investment_for_roi(
+def calculate_roi_from_solution(
     five_year_value_m: float,
+    investment_m: float,
     annual_maintenance_m: float,
-    target_roi: float = 180.0,
-    min_roi: float = 150.0,
-    max_roi: float = 300.0,
-) -> tuple[float, float, float]:
-    """
-    Produces a positive ROI inside the required band.
-
-    ROI = ((five_year_value - investment) / investment) * 100
-    Therefore, investment = five_year_value / (1 + target_roi / 100)
-
-    Returns: investment_m, roi_pct, investment_multiplier
-    """
+) -> tuple[float, float]:
+    """Calculate ROI from actual extracted solution economics. No target ROI band is forced."""
     five_year_value_m = round1(five_year_value_m)
+    investment_m = round1(investment_m)
     annual_maintenance_m = round1(annual_maintenance_m)
 
     if five_year_value_m <= 0:
         raise ValueError("Five-year value must be positive to calculate ROI.")
+    if investment_m <= 0:
+        raise ValueError("Investment must be positive to calculate ROI.")
     if annual_maintenance_m <= 0:
-        raise ValueError("Annual maintenance must be positive to calculate ROI.")
-
-    # Start with the target ROI investment level.
-    investment_m = five_year_value_m / (1 + target_roi / 100.0)
-
-    # Keep the investment commercially reasonable against annual maintenance.
-    min_investment_m = annual_maintenance_m * 1.0
-    max_investment_m = annual_maintenance_m * 6.0
-    investment_m = max(min_investment_m, min(investment_m, max_investment_m))
-    investment_m = round1(investment_m)
+        raise ValueError("Annual maintenance must be positive to calculate investment multiplier.")
 
     roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100.0)
-
-    # If commercial bounds still produce ROI outside range, prioritize the required ROI band.
-    if roi_pct < min_roi:
-        investment_m = round1(five_year_value_m / (1 + min_roi / 100.0))
-        roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100.0)
-
-    if roi_pct > max_roi:
-        investment_m = round1(five_year_value_m / (1 + max_roi / 100.0))
-        roi_pct = round1(((five_year_value_m - investment_m) / investment_m) * 100.0)
-
     multiplier = round1(investment_m / annual_maintenance_m)
 
-    if roi_pct < min_roi or roi_pct > max_roi:
-        raise ValueError(f"ROI solver failed to keep ROI between {min_roi}% and {max_roi}%. Got {roi_pct}%.")
+    if roi_pct < 100.0:
+        raise ValueError(
+            f"ROI is below the minimum acceptable threshold. Calculated ROI is {pfmt(roi_pct)}. "
+            "Strengthen the value case, reduce the investment scope, or revise phasing based on the actual solution economics."
+        )
 
-    return investment_m, roi_pct, multiplier
+    return roi_pct, multiplier
+
+
+def get_proposal_branding(consulting_partner: str) -> Dict[str, str]:
+    if consulting_partner == "Direct Client":
+        return {
+            "proposal_from": "Tholons",
+            "prepared_by": "Tholons Inc.",
+            "partnership_label": "Tholons-led transformation partnership",
+        }
+
+    return {
+        "proposal_from": f"{consulting_partner} & Tholons",
+        "prepared_by": f"{consulting_partner} & Tholons Inc.",
+        "partnership_label": f"{consulting_partner}-Tholons transformation partnership",
+    }
+
 
 
 # ============================================================
@@ -399,7 +520,7 @@ REQUIRED OUTPUT STRUCTURE
 
 1. [Business Line Name]
 
-Market Leaders: [List 4 named competitors.]
+Market Leaders: [List exactly 4 real company names that are actual market leaders or strong benchmark peers for this specific business line and sector. Never write Market Leader A, Market Leader B, leading banks, global peers, regional players, top competitors, or generic descriptions.]
 
 What "Good" Looks Like Today in {company_name}:
 · [Bullet 1]
@@ -407,19 +528,19 @@ What "Good" Looks Like Today in {company_name}:
 · [Bullet 3]
 
 What “Good” Looks Like Today Across Market Leaders:
-I. [Competitor 1] The "[Benchmark Theme]" Benchmark
+I. [Actual Company Name 1] The "[Benchmark Theme]" Benchmark
 · [Specific benchmark explanation]
 · [Specific benchmark explanation]
 
-II. [Competitor 2] The "[Benchmark Theme]" Benchmark
+II. [Actual Company Name 2] The "[Benchmark Theme]" Benchmark
 · [Specific benchmark explanation]
 · [Specific benchmark explanation]
 
-III. [Competitor 3] The "[Benchmark Theme]" Benchmark
+III. [Actual Company Name 3] The "[Benchmark Theme]" Benchmark
 · [Specific benchmark explanation]
 · [Specific benchmark explanation]
 
-IV. [Competitor 4] The "[Benchmark Theme]" Benchmark
+IV. [Actual Company Name 4] The "[Benchmark Theme]" Benchmark
 · [Specific benchmark explanation]
 · [Specific benchmark explanation]
 
@@ -455,6 +576,11 @@ FINAL RULES
 - No text after the final summary table.
 - The final table must not omit percentage ROI or improvement.
 - Do not mention any example company.
+- Every Market Leaders line must include exactly 4 actual company names.
+- The same 4 named companies must appear again in the "What Good Looks Like Today Across Market Leaders" section.
+- Never use placeholders such as Market Leader A, Market Leader B, Competitor 1, Competitor 2, Company A, Company B, Peer A, Peer B, or similar.
+- Never use generic descriptions such as leading global banks, regional players, market leaders, global competitors, industry leaders, top players, large incumbents, or benchmark peers instead of company names.
+- If a business line is niche, use the closest named public benchmark companies in that sector.
 """
 
 BI_STRUCTURE_FIX_PROMPT = """
@@ -496,7 +622,7 @@ Schema:
       "title": "Role Title",
       "linkedin": "",
       "type": "CEO | CFO | CMO | CIO | BUSINESS_LINE_HEAD | BUSINESS_LINE_TECH_HEAD | BOD",
-      "business_line": "Optional"
+      "business_lines": ["Optional list of business lines this person leads"]
     }}
   ]
 }}
@@ -509,6 +635,7 @@ Rules:
 - Use BUSINESS_LINE_HEAD for business line leaders
 - Use BUSINESS_LINE_TECH_HEAD for technology heads of business lines
 - Use BOD for board members
+- If one person leads multiple business lines, return all of them in business_lines.
 
 LEADERSHIP MAPPING TEXT:
 {leadership_text}
@@ -528,7 +655,7 @@ Name: {name}
 Title: {title}
 LinkedIn: {linkedin}
 Type: {exec_type}
-Business Line: {business_line}
+Business Lines Covered: {business_lines}
 
 TASK:
 Create a detailed executive storyline customized for this person.
@@ -582,6 +709,14 @@ Schema:
       "source_logic": ""
     }}
   ],
+  "investment_case": {{
+    "total_investment_m": 0,
+    "investment_logic": "",
+    "legacy_pct": 59.5,
+    "modernization_pct": 15.5,
+    "digital_pods_pct": 19.0,
+    "innovation_pct": 6.0
+  }},
   "error": ""
 }}
 
@@ -590,9 +725,15 @@ Rules:
 - sector must be one of: Financial Services, Semiconductor, Media, Telecom, Manufacturing, Healthcare, Retail.
 - Extract all meaningful value drivers from the BI.
 - estimated_weight_pct across business_units should sum close to 100.
+- total_investment_m must be based on the proposed ADM solution scope, company scale, application portfolio, maintenance baseline, modernization backlog, and delivery ambition.
+- Do NOT calculate total_investment_m by forcing ROI to a target number.
+- Do NOT target 150%, 180%, 200%, 250%, or 300% ROI.
+- ROI must emerge naturally from the value case and investment case.
+- The final ROI is allowed to exceed 300% if the underlying value case supports it.
+- The only minimum rule is that ROI must not be below 100%.
 - Do not invent fake value drivers just to reach a target count.
 - Output JSON only.
-- Never output 0 for employee_count, annual_revenue_m, revenue_or_cost_base_m, annual_impact_m, or improvement_pct unless explicitly stated in the BI.
+- Never output 0 for employee_count, annual_revenue_m, revenue_or_cost_base_m, annual_impact_m, improvement_pct, or total_investment_m unless explicitly stated in the BI.
 - If a company fact is missing, estimate it from the BI and public scale cues.
 - If a value driver is weak or incomplete, derive the annual impact using the best available base and percentage.
 - If you cannot support at least 4 value drivers with non-zero annual impact, return an error object instead of zero-filled rows.
@@ -647,6 +788,18 @@ IMPORTANT SOURCE RULES
 CLIENT NAME:
 {company_name}
 
+CONSULTING PARTNER:
+{consulting_partner}
+
+PROPOSAL FROM:
+{proposal_from}
+
+PREPARED BY:
+{prepared_by}
+
+PARTNERSHIP LABEL:
+{partnership_label}
+
 BUSINESS INTELLIGENCE DOCUMENT:
 {business_intelligence}
 
@@ -664,7 +817,7 @@ BATCH 1: Writing Executive Summary and Part 1. All numbers from Financial Summar
 THEN WRITE EXACTLY THIS STRUCTURE:
 
 COMPREHENSIVE APPLICATION PORTFOLIO ANALYSIS & 5-YEAR TRANSFORMATION PARTNERSHIP
-A Joint Proposal from Deloitte & Tholons to {company_name}
+A Joint Proposal from {proposal_from} to {company_name}
 
 EXECUTIVE SUMMARY: THE STRATEGIC IMPERATIVE
 
@@ -680,7 +833,7 @@ The Executive Summary must be 3 to 5 paragraphs and must include:
 - Competitive urgency against named market leaders
 
 Then include this exact bullet structure:
-Deloitte and Tholons propose a 5-year, [investment] "[partnership name]" partnership that will:
+{proposal_from} propose a 5-year, [investment] "{partnership_label}" that will:
 · Reduce legacy maintenance costs by [percentage/savings] through industrialized offshore delivery and modernization.
 · Accelerate digital transformation through API layers, cloud modernization, and AI-enabled delivery.
 · Generate [annual value] in annual business value at steady state.
@@ -781,6 +934,18 @@ SOURCE RULES
 CLIENT NAME:
 {company_name}
 
+CONSULTING PARTNER:
+{consulting_partner}
+
+PROPOSAL FROM:
+{proposal_from}
+
+PREPARED BY:
+{prepared_by}
+
+PARTNERSHIP LABEL:
+{partnership_label}
+
 BUSINESS INTELLIGENCE DOCUMENT:
 {business_intelligence}
 
@@ -853,7 +1018,7 @@ Prepared for:
 {company_name} Executive Leadership Team
 
 Prepared by:
-Deloitte Consulting LLP & Tholons Inc.
+{prepared_by}
 
 Date: March 2026
 
@@ -915,6 +1080,8 @@ def validate_financial_extraction_with_pydantic(data: Dict[str, Any]) -> Financi
         raise ValueError("Employee count must be non-zero.")
     if parsed.company_facts.annual_revenue_m <= 0:
         raise ValueError("Annual revenue must be non-zero.")
+    if parsed.investment_case.total_investment_m <= 0:
+        raise ValueError("Total investment must be non-zero and must come from the solution investment case.")
     if len(parsed.value_drivers) < 4:
         raise ValueError("At least 4 non-zero value drivers are required.")
 
@@ -949,6 +1116,9 @@ def financial_extract_node(state: AdmFinancialState) -> AdmFinancialState:
             return True
         if safe_float(facts.get("annual_revenue_m")) <= 0:
             return True
+        investment_case = data.get("investment_case", {})
+        if safe_float(investment_case.get("total_investment_m")) <= 0:
+            return True
 
         drivers = data.get("value_drivers", [])
         non_zero_drivers = sum(1 for d in drivers if safe_float(d.get("annual_impact_m")) > 0)
@@ -962,7 +1132,7 @@ STRICT RETRY INSTRUCTION:
 - Recalculate and re-estimate all missing company facts.
 - Return at least 4 non-zero value drivers.
 - Do not output any driver with annual_impact_m = 0.
-- Do not output employee_count = 0 or annual_revenue_m = 0.
+- Do not output employee_count = 0, annual_revenue_m = 0, or total_investment_m = 0.
 """
         raw = client.generate(retry_prompt)
         cleaned = clean_json_response(raw)
@@ -1048,20 +1218,22 @@ def build_blended_rates(sector: str) -> List[Dict[str, Any]]:
         us_pct, india_pct = mix.split("/")
         us_share = safe_float(us_pct) / 100.0
         india_share = safe_float(india_pct) / 100.0
-        blended = round1((us * us_share) + (india * india_share))
-        savings_pct = round1(((us - blended) / us) * 100)
+        blended_exact = (us * us_share) + (india * india_share)
+        blended_display = round1(blended_exact)
+        savings_pct = round1(((us - blended_exact) / us) * 100)
         out.append(
             {
                 "role": role,
                 "us_k": us,
                 "india_k": india,
                 "mix": mix,
-                "blended_k": blended,
+                "blended_k": blended_display,
                 "savings_pct": savings_pct,
-                "formula": f"({us} x {us_share:.2f}) + ({india} x {india_share:.2f}) = {blended}",
+                "formula": f"({us} x {us_share:.2f}) + ({india} x {india_share:.2f}) = {blended_display}",
             }
         )
     return out
+
 
 
 def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
@@ -1075,6 +1247,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     facts = extracted.get("company_facts", {})
     business_units = extracted.get("business_units", [])
     value_drivers_raw = extracted.get("value_drivers", [])
+    investment_case = extracted.get("investment_case", {})
 
     employee_count = safe_int(facts.get("employee_count"), 0)
     annual_revenue_m = safe_float(facts.get("annual_revenue_m"), 0.0)
@@ -1155,12 +1328,11 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     total_annual_value_m = round1(sum(v["annual_impact_m"] for v in value_drivers))
     five_year_value_m = round1(total_annual_value_m * 3.15)
 
-    investment_m, roi_pct, multiplier = solve_investment_for_roi(
+    investment_m = round1(safe_float(investment_case.get("total_investment_m")))
+    roi_pct, multiplier = calculate_roi_from_solution(
         five_year_value_m=five_year_value_m,
+        investment_m=investment_m,
         annual_maintenance_m=annual_maintenance_m,
-        target_roi=180.0,
-        min_roi=150.0,
-        max_roi=300.0,
     )
 
     cost_savings = {
@@ -1174,10 +1346,19 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
 
     blended_rates = build_blended_rates(sector)
 
-    legacy_total = round1(investment_m * 0.595)
-    modernization_total = round1(investment_m * 0.155)
-    digital_total = round1(investment_m * 0.19)
-    innovation_total = round1(investment_m * 0.06)
+    legacy_pct = safe_float(investment_case.get("legacy_pct"), 59.5) / 100.0
+    modernization_pct = safe_float(investment_case.get("modernization_pct"), 15.5) / 100.0
+    digital_pct = safe_float(investment_case.get("digital_pods_pct"), 19.0) / 100.0
+    innovation_pct = safe_float(investment_case.get("innovation_pct"), 6.0) / 100.0
+
+    component_totals = allocate_component_total(
+        investment_m,
+        [legacy_pct, modernization_pct, digital_pct, innovation_pct],
+    )
+    legacy_total = component_totals[0]
+    modernization_total = component_totals[1]
+    digital_total = component_totals[2]
+    innovation_total = component_totals[3]
 
     legacy_y = allocate_component_total(legacy_total, [0.24, 0.22, 0.20, 0.18, 0.16])
     modernization_y = allocate_component_total(modernization_total, [0.14, 0.22, 0.30, 0.20, 0.14])
@@ -1188,7 +1369,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         round1(legacy_y[i] + modernization_y[i] + digital_y[i] + innovation_y[i])
         for i in range(5)
     ]
-    total_y[-1] = round1(investment_m - sum(total_y[:-1]))
+    investment_m = round1(sum(total_y))
 
     partner_y = [round1(y * 0.42) for y in total_y]
     client_y = [round1(y * 0.58) for y in total_y]
@@ -1227,6 +1408,7 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
         "total_annual_value_m": total_annual_value_m,
         "five_year_value_m": five_year_value_m,
         "investment_m": investment_m,
+        "investment_logic": investment_case.get("investment_logic", "Investment based on proposed ADM solution scope and delivery phasing."),
         "investment_multiplier_used": multiplier,
         "roi_pct": roi_pct,
         "payback_years": payback_years,
@@ -1283,8 +1465,8 @@ def validate_financial_math(fs: Dict[str, Any]) -> List[str]:
         expected_roi = round1(((five_year_value_m - investment_m) / investment_m) * 100)
         if not approx_equal(expected_roi, fs["roi_pct"]):
             errors.append(f"ROI should be {pfmt(expected_roi)}, not {pfmt(fs['roi_pct'])}.")
-        if fs["roi_pct"] < 150.0 or fs["roi_pct"] > 300.0:
-            errors.append(f"ROI must stay between 150.0% and 300.0%, not {pfmt(fs['roi_pct'])}.")
+        if fs["roi_pct"] < 100.0:
+            errors.append(f"ROI must be at least 100.0%, not {pfmt(fs['roi_pct'])}.")
 
     multiplier = safe_float(fs.get("investment_multiplier_used"))
     annual_maintenance_m = safe_float(fs["base_data"].get("annual_maintenance_m"))
@@ -1371,6 +1553,87 @@ def validate_bi_structure(bi_text: str) -> List[str]:
 
     if contains_bad_zero_values(bi_text):
         errors.append("BI contains unsupported zero values.")
+
+    errors.extend(validate_bi_summary_roi_table(bi_text))
+    errors.extend(validate_named_market_leaders(bi_text))
+
+    return errors
+
+
+def validate_bi_summary_roi_table(bi_text: str) -> List[str]:
+    errors = []
+    if "Summary of Quantified Impact Annual" not in bi_text:
+        return ["BI missing Summary of Quantified Impact Annual table."]
+
+    section = bi_text.split("Summary of Quantified Impact Annual", 1)[-1]
+    table_lines = [line.strip() for line in section.splitlines() if line.strip().startswith("|")]
+
+    if len(table_lines) < 3:
+        return ["BI Summary of Quantified Impact Annual table is missing or malformed."]
+
+    header = table_lines[0]
+    if "Percentage ROI / Improvement" not in header:
+        errors.append("BI summary table missing Percentage ROI / Improvement column.")
+
+    for line in table_lines[2:]:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 4:
+            errors.append(f"BI summary table row has too few columns: {line}")
+            continue
+        pct_cell = cells[2]
+        if not pct_cell or pct_cell.lower() in {"n/a", "na", "-", "tbd"}:
+            errors.append(f"BI summary table has blank ROI/improvement percentage: {line}")
+        elif "%" not in pct_cell:
+            errors.append(f"BI summary table ROI/improvement cell must include a percentage: {line}")
+
+    return errors
+
+
+def validate_named_market_leaders(bi_text: str) -> List[str]:
+    errors = []
+    banned_patterns = [
+        r"\bmarket leader\s*[a-z0-9]\b",
+        r"\bcompetitor\s*[a-z0-9]\b",
+        r"\bcompany\s*[a-z0-9]\b",
+        r"\bpeer\s*[a-z0-9]\b",
+        r"leading global",
+        r"regional players",
+        r"regional banks",
+        r"top competitors",
+        r"market leaders",
+        r"industry leaders",
+        r"global peers",
+        r"regional peers",
+        r"leading banks",
+        r"leading companies",
+        r"large incumbents",
+        r"benchmark peers",
+    ]
+
+    market_leader_lines = [
+        line.strip()
+        for line in bi_text.splitlines()
+        if line.strip().lower().startswith("market leaders:")
+    ]
+
+    if not market_leader_lines:
+        return ["BI does not contain any Market Leaders lines."]
+
+    for line in market_leader_lines:
+        lower = line.lower()
+        names_part = line.split(":", 1)[-1].strip()
+        names = [x.strip() for x in re.split(r",|;|\|", names_part) if x.strip()]
+
+        for pattern in banned_patterns:
+            if re.search(pattern, lower):
+                errors.append(f"Generic or placeholder market leader wording found: {line}")
+
+        if len(names) != 4:
+            errors.append(f"Market Leaders must list exactly 4 named companies: {line}")
+
+        for name in names:
+            if re.search(r"\b(leader|competitor|peer|player|company)\b", name.lower()):
+                errors.append(f"Market leader entry appears generic instead of named: {name}")
 
     return errors
 
@@ -1518,8 +1781,8 @@ def financial_validate_node(state: AdmFinancialState) -> AdmFinancialState:
     errors = validate_financial_math(fs)
 
     roi_pct = safe_float(fs.get("roi_pct"))
-    if roi_pct < 150.0 or roi_pct > 300.0:
-        errors.append(f"ROI must be between 150.0% and 300.0%. Current ROI is {pfmt(roi_pct)}.")
+    if roi_pct < 100.0:
+        errors.append(f"ROI must be at least 100.0%. Current ROI is {pfmt(roi_pct)}.")
 
     return {"error": " | ".join(errors)} if errors else {"error": ""}
 
@@ -1698,8 +1961,6 @@ def build_roi_table_text(fs: Dict[str, Any]) -> str:
 
 def build_business_value_creation_table(fs: Dict[str, Any]) -> str:
     unit_names = [u["name"] for u in fs["business_unit_allocations"]]
-    if len(unit_names) < 2:
-        unit_names = unit_names + ["Business Unit 2"]
 
     maps = {
         "Revenue Growth": {u: 0.0 for u in unit_names},
@@ -1711,35 +1972,39 @@ def build_business_value_creation_table(fs: Dict[str, Any]) -> str:
     for vd in fs["value_drivers"]:
         unit = vd["business_unit"] if vd["business_unit"] in unit_names else unit_names[0]
         name = vd["driver_name"].lower()
-        annual = vd["annual_impact_m"] * 3.15
+        annual_5yr = round1(vd["annual_impact_m"] * 3.15)
 
         if any(k in name for k in ["retention", "churn", "renewal", "retained"]):
-            maps["Asset Retention"][unit] += annual
+            maps["Asset Retention"][unit] += annual_5yr
         elif any(k in name for k in ["risk", "delinquency", "compliance", "fraud"]):
-            maps["Risk Mitigation"][unit] += annual
+            maps["Risk Mitigation"][unit] += annual_5yr
         elif any(k in name for k in ["cost", "efficiency", "savings", "productivity", "cycle", "reduction"]):
-            maps["Cost Reduction"][unit] += annual
+            maps["Cost Reduction"][unit] += annual_5yr
         else:
-            maps["Revenue Growth"][unit] += annual
+            maps["Revenue Growth"][unit] += annual_5yr
 
-    header_units = unit_names[:3]
-    header = "| Value Driver | " + " | ".join(header_units) + " | Total |"
-    sep = "|---|" + "|".join(["---:" for _ in header_units]) + "|---:|"
-
+    header = "| Value Driver | " + " | ".join(unit_names) + " | Total |"
+    sep = "|---|" + "|".join(["---:" for _ in unit_names]) + "|---:|"
     rows = [header, sep]
 
+    non_zero_labels = []
     for label, mp in maps.items():
-        total = sum(mp.values())
+        total = round1(sum(mp.values()))
         if total <= 0:
             continue
-        values = [mfmt_or_na(mp.get(u, 0.0)) for u in header_units]
-        rows.append(f"| {label} | " + " | ".join(values) + f" | {mfmt_or_na(total)} |")
+        non_zero_labels.append(label)
+        values = [mfmt_or_na(round1(mp.get(u, 0.0))) for u in unit_names]
+        rows.append(f"| {label} | " + " | ".join(values) + f" | {mfmt(total)} |")
 
-    total_values = []
-    for u in header_units:
-        total_values.append(sum(maps[label].get(u, 0.0) for label in maps))
-    rows.append(f"| TOTAL VALUE | " + " | ".join(mfmt_or_na(v) for v in total_values) + f" | {mfmt_or_na(sum(total_values))} |")
+    if len(non_zero_labels) > 1:
+        total_values = []
+        for u in unit_names:
+            total_values.append(round1(sum(maps[label].get(u, 0.0) for label in maps)))
+        grand_total = round1(sum(total_values))
+        rows.append("| TOTAL VALUE | " + " | ".join(mfmt_or_na(v) for v in total_values) + f" | {mfmt(grand_total)} |")
+
     return "\n".join(rows)
+
 
 
 def build_all_financial_tables_text(fs: Dict[str, Any]) -> str:
@@ -1782,10 +2047,33 @@ def generate_bi(client: GeminiClient, company_name: str) -> str:
     fixed_bi = client.generate(
         BI_STRUCTURE_FIX_PROMPT.format(
             company_name=company_name,
-            bi_text=raw_bi
+            bi_text=raw_bi,
         )
     )
+
+    errors = validate_bi_structure(fixed_bi)
+    if errors:
+        retry_prompt = BI_STRUCTURE_FIX_PROMPT.format(
+            company_name=company_name,
+            bi_text=fixed_bi,
+        ) + """
+
+STRICT RETRY:
+- Fix every issue found by the BI validator.
+- Every Market Leaders section must list exactly 4 actual company names for that specific business line and sector.
+- Do not write Market Leader A, Market Leader B, Competitor 1, Company A, Peer A, leading global players, regional competitors, top players, or similar placeholders.
+- The same 4 named companies must appear in the benchmark section below.
+- The Summary of Quantified Impact Annual table must include a non-blank percentage ROI / improvement value in every row.
+- Return the full corrected BI document.
+"""
+        fixed_bi = client.generate(retry_prompt)
+
+    final_errors = validate_bi_structure(fixed_bi)
+    if final_errors:
+        raise ValueError("BI validation failed: " + " | ".join(final_errors))
+
     return fixed_bi
+
 
 
 def generate_storylines(
@@ -1806,7 +2094,7 @@ def generate_storylines(
             title=profile.title,
             linkedin=profile.linkedin,
             exec_type=profile.type,
-            business_line=profile.business_line or "N/A",
+            business_lines=", ".join(profile.business_lines or []) or "N/A",
         )
         results[f"{profile.type}__{profile.name}"] = client.generate(prompt)
         progress.progress(idx / total)
@@ -1847,12 +2135,18 @@ STRICT RETRY:
 def generate_adm_batch1(
     client: GeminiClient,
     company_name: str,
+    consulting_partner: str,
     business_intelligence: str,
     financial_summary: Dict[str, Any],
     financial_tables_text: str,
 ) -> str:
+    branding = get_proposal_branding(consulting_partner)
     prompt = ADM_BATCH1_PROMPT.format(
         company_name=company_name,
+        consulting_partner=consulting_partner,
+        proposal_from=branding["proposal_from"],
+        prepared_by=branding["prepared_by"],
+        partnership_label=branding["partnership_label"],
         business_intelligence=business_intelligence,
         financial_summary_json=json.dumps(financial_summary, indent=2),
         financial_tables_text=financial_tables_text,
@@ -1869,17 +2163,24 @@ def generate_adm_batch1(
     return corrected
 
 
+
 def generate_adm_next_batch(
     client: GeminiClient,
     company_name: str,
+    consulting_partner: str,
     business_intelligence: str,
     financial_summary: Dict[str, Any],
     financial_tables_text: str,
     current_adm_text: str,
     next_batch_number: int,
 ) -> str:
+    branding = get_proposal_branding(consulting_partner)
     prompt = ADM_CONTINUE_PROMPT.format(
         company_name=company_name,
+        consulting_partner=consulting_partner,
+        proposal_from=branding["proposal_from"],
+        prepared_by=branding["prepared_by"],
+        partnership_label=branding["partnership_label"],
         business_intelligence=business_intelligence,
         financial_summary_json=json.dumps(financial_summary, indent=2),
         financial_tables_text=financial_tables_text,
@@ -1898,6 +2199,7 @@ def generate_adm_next_batch(
     return corrected
 
 
+
 # ============================================================
 # SESSION STATE
 # ============================================================
@@ -1913,6 +2215,7 @@ defaults = {
     "adm_batch": 0,
     "validation_report": {},
     "validation_report_text": "",
+    "consulting_partner": "Deloitte",
 }
 
 for key, value in defaults.items():
@@ -1936,6 +2239,12 @@ model_name = DEFAULT_MODEL_NAME
 st.sidebar.text_input("Model", value=model_name, disabled=True)
 
 company_name = st.sidebar.text_input("Target Company Name")
+consulting_partner = st.sidebar.selectbox(
+    "Consulting Partner",
+    ["Deloitte", "APEX", "UST", "Direct Client"],
+    index=["Deloitte", "APEX", "UST", "Direct Client"].index(st.session_state.get("consulting_partner", "Deloitte")),
+)
+st.session_state.consulting_partner = consulting_partner
 
 st.sidebar.markdown("### Leadership Mapping Text")
 leadership_text = st.sidebar.text_area(
@@ -1996,13 +2305,17 @@ def refresh_validation_report() -> None:
 # ============================================================
 
 st.subheader("Inputs")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
     st.markdown("**Company**")
     st.write(company_name or "Not set")
 
 with col2:
+    st.markdown("**Consulting Partner**")
+    st.write(consulting_partner)
+
+with col3:
     st.markdown("**Model**")
     st.write(model_name)
 
@@ -2121,6 +2434,7 @@ if adm_batch1_btn:
                 batch1_text = generate_adm_batch1(
                     client=client,
                     company_name=company_name,
+                    consulting_partner=consulting_partner,
                     business_intelligence=st.session_state.bi_text,
                     financial_summary=st.session_state.financial_summary,
                     financial_tables_text=st.session_state.financial_tables_text,
@@ -2146,6 +2460,7 @@ if adm_continue_btn:
                     new_batch_text = generate_adm_next_batch(
                         client=client,
                         company_name=company_name,
+                        consulting_partner=consulting_partner,
                         business_intelligence=st.session_state.bi_text,
                         financial_summary=st.session_state.financial_summary,
                         financial_tables_text=st.session_state.financial_tables_text,
@@ -2194,6 +2509,13 @@ with tab1:
             data=save_docx_bytes(f"{company_name} Business Intelligence", st.session_state.bi_text),
             file_name=f"{sanitize_filename(company_name)}_Business_Intelligence.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download BI PDF",
+            data=save_pdf_bytes(f"{company_name} Business Intelligence", st.session_state.bi_text),
+            file_name=f"{sanitize_filename(company_name)}_Business_Intelligence.pdf",
+            mime="application/pdf",
             use_container_width=True,
         )
 
@@ -2259,6 +2581,13 @@ with tab3:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
         )
+        st.download_button(
+            "Download Financial Summary PDF",
+            data=save_pdf_bytes(f"{company_name} ADM Financial Summary", st.session_state.financial_summary_text),
+            file_name=f"{sanitize_filename(company_name)}_ADM_Financial_Summary.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 with tab4:
     st.markdown(f"**ADM Progress:** Batch {st.session_state.adm_batch} / 6")
@@ -2277,6 +2606,13 @@ with tab4:
             data=save_docx_bytes(f"{company_name} ADM", st.session_state.adm_text),
             file_name=f"{sanitize_filename(company_name)}_ADM.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download ADM PDF",
+            data=save_pdf_bytes(f"{company_name} ADM", st.session_state.adm_text),
+            file_name=f"{sanitize_filename(company_name)}_ADM.pdf",
+            mime="application/pdf",
             use_container_width=True,
         )
 
