@@ -1814,8 +1814,10 @@ def build_validation_report(
     else:
         financial_errors = ["Financial summary has not been generated."]
 
-    if adm_text and fs:
+    if adm_text and fs and adm_batch > 0:
         adm_errors = validate_adm_structure_and_numbers(adm_text, fs, adm_batch=adm_batch)
+    elif adm_text and fs and adm_batch <= 0:
+        warnings.append("ADM text exists but ADM batch status is 0. Generate ADM Batch 1 again to lock it to the current financial summary.")
     elif adm_text and not fs:
         adm_errors = ["ADM exists but financial summary is missing."]
     else:
@@ -2384,6 +2386,33 @@ def refresh_validation_report() -> None:
     st.session_state.validation_report_text = render_validation_report_text(report)
 
 
+def clear_downstream_outputs(clear_bi: bool = False) -> None:
+    """
+    Prevent stale outputs from being validated against newly generated upstream data.
+    Example: if a new financial summary is generated, the old ADM must be cleared
+    because it was created from old locked numbers.
+    """
+    if clear_bi:
+        st.session_state.bi_text = ""
+
+    st.session_state.storylines = {}
+    st.session_state.financial_summary = None
+    st.session_state.financial_summary_text = ""
+    st.session_state.financial_tables_text = ""
+    st.session_state.adm_text = ""
+    st.session_state.adm_batch = 0
+    st.session_state.validation_report = {}
+    st.session_state.validation_report_text = ""
+
+
+def clear_adm_outputs_only() -> None:
+    """Clear ADM after financial numbers change, while preserving BI and financial summary."""
+    st.session_state.adm_text = ""
+    st.session_state.adm_batch = 0
+    st.session_state.validation_report = {}
+    st.session_state.validation_report_text = ""
+
+
 # ============================================================
 # UI
 # ============================================================
@@ -2445,9 +2474,11 @@ if bi_btn:
         try:
             client = GeminiClient(api_key=api_key, model=model_name)
             with st.spinner("Generating Business Intelligence..."):
-                st.session_state.bi_text = generate_bi(client, company_name)
+                new_bi_text = generate_bi(client, company_name)
+                clear_downstream_outputs(clear_bi=False)
+                st.session_state.bi_text = new_bi_text
             refresh_validation_report()
-            st.success("Business Intelligence generated.")
+            st.success("Business Intelligence generated. Downstream ADM and financial outputs were reset to prevent stale-number validation.")
         except Exception as e:
             st.error(f"BI generation failed: {e}")
 
@@ -2493,8 +2524,9 @@ if financial_btn:
                 st.session_state.financial_summary = financial_summary
                 st.session_state.financial_tables_text = build_all_financial_tables_text(financial_summary)
                 st.session_state.financial_summary_text = render_financial_summary_text(company_name, financial_summary)
+                clear_adm_outputs_only()
             refresh_validation_report()
-            st.success("ADM Financial Summary generated and validated.")
+            st.success("ADM Financial Summary generated and validated. Existing ADM was reset because locked numbers changed.")
         except Exception as e:
             st.error(f"Financial summary generation failed: {e}")
 
