@@ -370,6 +370,49 @@ def allocate_component_total(total: float, weights: List[float]) -> List[float]:
     return rounded
 
 
+
+
+def allocate_partner_client_split(total_y: List[float], partner_share: float = 0.42) -> Dict[str, Any]:
+    """
+    Creates a deterministic partner/client split that reconciles exactly.
+
+    Why this exists:
+    - Rounding each year independently can make partner_total fail the 42% test.
+    - This function first locks the total split, then allocates the partner share across years.
+    - Client yearly values are calculated as the residual, so each year still ties to total_y.
+    """
+    total_y = [round1(x) for x in total_y]
+    total_investment = round1(sum(total_y))
+
+    partner_total, client_total = allocate_component_total(
+        total_investment,
+        [partner_share, 1.0 - partner_share],
+    )
+
+    if total_investment <= 0:
+        raise ValueError("Total investment must be positive for partner/client split.")
+
+    year_weights = [y / total_investment for y in total_y]
+    partner_y = allocate_component_total(partner_total, year_weights)
+
+    client_y = [round1(total_y[i] - partner_y[i]) for i in range(len(total_y))]
+    client_diff = round1(client_total - sum(client_y))
+    if client_y:
+        client_y[-1] = round1(client_y[-1] + client_diff)
+
+    for i in range(len(total_y)):
+        yearly_check = round1(partner_y[i] + client_y[i])
+        if yearly_check != total_y[i]:
+            client_y[i] = round1(client_y[i] + round1(total_y[i] - yearly_check))
+
+    return {
+        "partner_y_m": partner_y,
+        "client_y_m": client_y,
+        "partner_total_m": round1(sum(partner_y)),
+        "client_total_m": round1(sum(client_y)),
+    }
+
+
 def find_payback_years(investment: float, annual_value: float) -> float:
     if investment <= 0 or annual_value <= 0:
         return 0.0
@@ -1371,10 +1414,18 @@ def financial_compute_node(state: AdmFinancialState) -> AdmFinancialState:
     ]
     investment_m = round1(sum(total_y))
 
-    partner_y = [round1(y * 0.42) for y in total_y]
-    client_y = [round1(y * 0.58) for y in total_y]
-    partner_total = round1(sum(partner_y))
-    client_total = round1(sum(client_y))
+    # Recalculate ROI after investment schedule rounding so the final displayed investment and ROI reconcile.
+    roi_pct, multiplier = calculate_roi_from_solution(
+        five_year_value_m=five_year_value_m,
+        investment_m=investment_m,
+        annual_maintenance_m=annual_maintenance_m,
+    )
+
+    split = allocate_partner_client_split(total_y, partner_share=0.42)
+    partner_y = split["partner_y_m"]
+    client_y = split["client_y_m"]
+    partner_total = split["partner_total_m"]
+    client_total = split["client_total_m"]
 
     partner_margin_low_m = round1(partner_total * 0.18)
     partner_margin_high_m = round1(partner_total * 0.22)
@@ -1524,6 +1575,12 @@ def validate_financial_math(fs: Dict[str, Any]) -> List[str]:
     expected_client_total = round1(fs["investment_m"] * 0.58)
     if not approx_equal(expected_client_total, p["client_total_m"]):
         errors.append("Client total is not 58% of total investment.")
+
+    for i in range(5):
+        split_col = round1(p["partner_y_m"][i] + p["client_y_m"][i])
+        expected_col = round1(fs["investment_schedule"]["total_y_m"][i])
+        if not approx_equal(split_col, expected_col):
+            errors.append(f"Partner/client split column Y{i + 1} does not equal investment schedule total.")
 
     expected_low = round1(p["partner_total_m"] * 0.18)
     expected_high = round1(p["partner_total_m"] * 0.22)
